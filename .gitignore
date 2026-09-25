@@ -1,0 +1,14 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 本地实验脚本
+/scratch/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
