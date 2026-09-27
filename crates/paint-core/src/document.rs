@@ -12,6 +12,8 @@ pub struct Document {
     /// 空白区点阵网格（无限画布的空间指示）。仅屏幕合成使用；
     /// 导出走独立文档，不受此开关影响。
     show_grid: bool,
+    /// 像素级选区（R 通道；None = 无选区）。裁剪笔画写入范围。
+    selection: Option<crate::tile::TileGrid>,
 }
 
 impl Document {
@@ -25,6 +27,7 @@ impl Document {
             history: History::new(undo_memory_limit),
             background: Color::WHITE,
             show_grid: false,
+            selection: None,
         }
     }
 
@@ -37,7 +40,19 @@ impl Document {
             history: History::new(usize::MAX),
             background: Color::WHITE,
             show_grid: false,
+            selection: None,
         }
+    }
+
+    pub fn selection(&self) -> Option<&crate::tile::TileGrid> {
+        self.selection.as_ref()
+    }
+
+    /// 返回是否有变化。
+    pub fn set_selection(&mut self, sel: Option<crate::tile::TileGrid>) -> bool {
+        let changed = self.selection.is_some() != sel.is_some();
+        self.selection = sel;
+        changed
     }
 
     pub fn layers(&self) -> &LayerStack {

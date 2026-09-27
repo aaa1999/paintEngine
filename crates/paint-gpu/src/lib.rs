@@ -468,9 +468,10 @@ impl Renderer for WgpuRenderer {
         &mut self,
         grid: &mut paint_core::tile::TileGrid,
         dabs: &[Dab],
+        clip: Option<&paint_core::tile::TileGrid>,
         recorder: &mut StrokeRecorder,
     ) {
-        cpu_stamp(grid, dabs, recorder);
+        cpu_stamp(grid, dabs, clip, recorder);
     }
 
     fn merge_layers(&mut self, dst: &mut Layer, src: &Layer, recorder: &mut StrokeRecorder) {

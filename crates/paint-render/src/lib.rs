@@ -32,8 +32,14 @@ impl SoftwareRenderer {
 }
 
 impl Renderer for SoftwareRenderer {
-    fn stamp_dabs(&mut self, grid: &mut TileGrid, dabs: &[Dab], recorder: &mut StrokeRecorder) {
-        stamp::stamp_dabs(grid, dabs, recorder);
+    fn stamp_dabs(
+        &mut self,
+        grid: &mut TileGrid,
+        dabs: &[Dab],
+        clip: Option<&TileGrid>,
+        recorder: &mut StrokeRecorder,
+    ) {
+        stamp::stamp_dabs(grid, dabs, clip, recorder);
     }
 
     fn composite(

@@ -22,7 +22,7 @@ pub mod viewport;
 
 pub use color::Color;
 pub use document::Document;
-pub use engine::{Dirty, Engine, Tool};
+pub use engine::{Dirty, Engine, SelectionOp, Tool};
 pub use geometry::Rect;
 pub use history::{History, StrokeRecorder, UndoGroup, UndoOp};
 pub use input::{PlatformEvent, PointerKind, PointerPhase, PointerSample};

@@ -226,3 +226,85 @@ fn gesture_pan_zoom_on_screen() {
     // 无历史条目产生
     assert_eq!(e.document().history().undo_len(), 1, "只有最初的笔画");
 }
+
+#[test]
+fn selection_clips_strokes() {
+    let (mut e, mut s) = engine();
+    // 先无选区画一笔打底（x 10..50），记录右半基准
+    draw(&mut e, 10.0, 50.0, 32.0);
+    let base = frame(&mut e, &mut s);
+    let right_ink = |f: &[u8]| -> usize {
+        f.as_chunks::<4>()
+            .0
+            .chunks(64)
+            .map(|row| {
+                row.iter()
+                    .skip(34)
+                    .filter(|p| p[0] < 128 && p[3] == 255)
+                    .count()
+            })
+            .sum()
+    };
+    let base_right = right_ink(&base);
+
+    // 矩形选区只覆盖左半（x < 32）
+    e.select_rect(Rect::new(0, 0, 32, 64), paint_core::SelectionOp::Replace);
+    assert!(e.has_selection());
+    assert_eq!(e.document().history().undo_len(), 1, "选区不入撤销");
+
+    // 新一笔横穿边界：右半墨迹应不变（选区外裁剪）
+    draw(&mut e, 8.0, 56.0, 12.0);
+    let after = right_ink(&frame(&mut e, &mut s));
+    assert_eq!(after, base_right, "选区外不可画");
+    // 左半应有新增
+    let f = frame(&mut e, &mut s);
+    let left = f
+        .as_chunks::<4>()
+        .0
+        .chunks(64)
+        .map(|row| {
+            row.iter()
+                .take(30)
+                .filter(|p| p[0] < 128 && p[3] == 255)
+                .count()
+        })
+        .sum::<usize>();
+    assert!(left > 0, "选区内可画");
+
+    // 清除选区后右半可画
+    e.clear_selection();
+    draw(&mut e, 40.0, 56.0, 12.0);
+    let freed = right_ink(&frame(&mut e, &mut s));
+    assert!(freed > base_right, "清选区后自由");
+}
+
+#[test]
+fn lasso_selection_polygon_fill() {
+    let (mut e, mut s) = engine();
+    // 三角形套索（画布坐标 ≈ 屏幕，zoom1）
+    e.select_lasso(
+        &[(10.0, 10.0), (50.0, 10.0), (30.0, 50.0)],
+        paint_core::SelectionOp::Replace,
+    );
+    // 三角形重心 (30, ~23) 附近可画；外点 (56, 40) 不可画
+    draw(&mut e, 26.0, 34.0, 23.0);
+    draw(&mut e, 52.0, 58.0, 40.0);
+    let f = frame(&mut e, &mut s);
+    let row = |y: usize| -> (usize, usize) {
+        let r = &f.as_chunks::<4>().0[y * 64..(y + 1) * 64];
+        (
+            r.iter()
+                .take(40)
+                .filter(|p| p[0] < 128 && p[3] == 255)
+                .count(),
+            r.iter()
+                .skip(46)
+                .filter(|p| p[0] < 128 && p[3] == 255)
+                .count(),
+        )
+    };
+    let (inside, _outside) = row(23);
+    assert!(inside > 0, "三角形内可画");
+    let (_, far_out) = row(40);
+    assert_eq!(far_out, 0, "三角形外不可画");
+}

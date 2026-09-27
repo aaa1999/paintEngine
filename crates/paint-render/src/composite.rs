@@ -37,6 +37,9 @@ pub fn composite(
             paint_grid(doc, target, width, &clip);
         }
     }
+    if let Some(sel) = doc.selection() {
+        paint_selection_outline(doc, sel, target, width, &clip);
+    }
 
     let vp = doc.viewport();
     let zoom = vp.zoom();
@@ -229,6 +232,72 @@ pub fn composite(
     }
 }
 
+/// 选区轮廓：选区内且四邻存在选区外的像素染半透明红（最近邻到屏幕）。
+/// 仅 CPU 路径绘制（GPU 合成模式下裁剪仍生效，轮廓线省略）。
+fn paint_selection_outline(
+    doc: &Document,
+    sel: &paint_core::tile::TileGrid,
+    target: &mut [u8],
+    width: u32,
+    clip: &Rect,
+) {
+    let vp = doc.viewport();
+    let (rot_c, rot_s) = (vp.rotation().cos(), vp.rotation().sin());
+    let flip = vp.flip_x();
+    let zoom = vp.zoom();
+    let _inv = 1.0 / zoom;
+    let (pan_x, pan_y) = vp.pan();
+    let sel_at = |cx: i64, cy: i64| -> bool {
+        sel.get(paint_core::tile::TileId::at(cx, cy))
+            .map(|t| {
+                let (ox, oy) = paint_core::tile::TileId::at(cx, cy).origin();
+                let i = (((cy - oy) * 256 + (cx - ox)) * 4) as usize;
+                t.pixels()[i] > 127
+            })
+            .unwrap_or(false)
+    };
+    for (tid, _tile) in sel.iter_entries() {
+        let (ox, oy) = tid.origin();
+        for y in 0..TILE as i64 {
+            for x in 0..TILE as i64 {
+                let (cx, cy) = (ox + x, oy + y);
+                if !sel_at(cx, cy) {
+                    continue;
+                }
+                // 边界：任一邻点在选区外
+                let edge = !(sel_at(cx - 1, cy)
+                    && sel_at(cx + 1, cy)
+                    && sel_at(cx, cy - 1)
+                    && sel_at(cx, cy + 1));
+                if !edge {
+                    continue;
+                }
+                // 画布 → 屏幕（最近邻）
+                let mut px = cx as f64 * zoom;
+                if flip {
+                    px = -px;
+                }
+                let py = cy as f64 * zoom;
+                let sx = (rot_c * px - rot_s * py + pan_x) as i32;
+                let sy = (rot_s * px + rot_c * py + pan_y) as i32;
+                if sx >= clip.x
+                    && sx < clip.x + clip.w as i32
+                    && sy >= clip.y
+                    && sy < clip.y + clip.h as i32
+                {
+                    let i = (sy as usize * width as usize + sx as usize) * 4;
+                    if i + 3 < target.len() {
+                        target[i] = 255;
+                        target[i + 1] = 60;
+                        target[i + 2] = 60;
+                        target[i + 3] = 255;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// 蒙版瓦片 R 通道（无瓦片处 = 1 全显）。
 fn mask_nearest(mask: &paint_core::tile::TileGrid, tx: i64, ty: i64, lx: usize, ly: usize) -> f32 {
     mask.get(paint_core::tile::TileId {
@@ -370,7 +439,12 @@ mod tests {
             erase: false,
         }];
         let layer = layers.get_mut(lid);
-        super::super::stamp::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(lid));
+        super::super::stamp::stamp_dabs(
+            &mut layer.tiles,
+            &dabs,
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
         (doc, 64)
     }
 
@@ -587,7 +661,12 @@ mod tests {
             erase: false,
         }];
         let layer = layers.get_mut(top);
-        super::super::stamp::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(top));
+        super::super::stamp::stamp_dabs(
+            &mut layer.tiles,
+            &dabs,
+            None,
+            &mut StrokeRecorder::new(top),
+        );
         let mut frame = vec![0u8; (w * w * 4) as usize];
         composite(
             &doc,

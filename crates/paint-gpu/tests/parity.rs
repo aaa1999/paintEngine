@@ -34,7 +34,12 @@ fn scene(mid_mode: BlendMode) -> Document {
             dab(60.0, 60.0, 10.0, Color::BLACK, 1.0),
             dab(80.0, 80.0, 14.0, Color::BLACK, 1.0),
         ];
-        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(bottom));
+        paint_render::stamp_dabs(
+            &mut layer.tiles,
+            &dabs,
+            None,
+            &mut StrokeRecorder::new(bottom),
+        );
     }
     let mid = doc.layers_mut().insert(None);
     {
@@ -63,7 +68,7 @@ fn scene(mid_mode: BlendMode) -> Document {
                 1.0,
             ),
         ];
-        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(mid));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, None, &mut StrokeRecorder::new(mid));
         layer.opacity = 0.6;
         layer.blend_mode = mid_mode;
     }
@@ -71,7 +76,7 @@ fn scene(mid_mode: BlendMode) -> Document {
     {
         let layer = doc.layers_mut().get_mut(top);
         let dabs = vec![dab(50.0, 90.0, 8.0, Color::WHITE, 1.0)];
-        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(top));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, None, &mut StrokeRecorder::new(top));
     }
     doc
 }

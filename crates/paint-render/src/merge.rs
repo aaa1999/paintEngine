@@ -80,7 +80,7 @@ mod tests {
             erase: false,
         }];
         let l = layers.get_mut(id);
-        super::super::stamp::stamp_dabs(&mut l.tiles, &dabs, &mut StrokeRecorder::new(id));
+        super::super::stamp::stamp_dabs(&mut l.tiles, &dabs, None, &mut StrokeRecorder::new(id));
     }
 
     fn pixel_at(layer: &Layer, x: usize, y: usize) -> [u8; 4] {

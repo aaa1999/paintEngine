@@ -13,8 +13,15 @@ use crate::tile::TileGrid;
 /// 保证引擎不依赖任何具体渲染实现。
 pub trait Renderer: Send {
     /// 笔刷盖章热路径（目标为任意瓦片网格：像素层或图层蒙版）。
+    /// `clip`：选区网格（R 通道，无瓦片处=选区外不可画）；None = 无选区。
     /// 写入瓦片前必须经 `recorder.capture` 记录旧快照（撤销依赖）。
-    fn stamp_dabs(&mut self, grid: &mut TileGrid, dabs: &[Dab], recorder: &mut StrokeRecorder);
+    fn stamp_dabs(
+        &mut self,
+        grid: &mut TileGrid,
+        dabs: &[Dab],
+        clip: Option<&TileGrid>,
+        recorder: &mut StrokeRecorder,
+    );
 
     /// 合成可见图层到目标缓冲（RGBA8 预乘，行主序，尺寸 `width` ×
     /// `target.len()/width/4`），只处理 `dirty` 区域。

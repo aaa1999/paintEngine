@@ -29,6 +29,14 @@ impl Dirty {
     }
 }
 
+/// 选区布尔操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionOp {
+    Replace,
+    Add,
+    Subtract,
+}
+
 /// 当前工具。橡皮 = 同一 RoundBrush 引擎、dst-out 合成；
 /// 蒙版编辑 = 盖章目标切到活动图层的蒙版网格（白=显现）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +224,94 @@ impl Engine {
             self.dirty = Dirty::All;
         }
         r
+    }
+
+    // ── 选区（像素级裁剪笔画；不入撤销历史，与主流软件一致）──
+
+    /// 是否有活动选区。
+    pub fn has_selection(&self) -> bool {
+        self.doc.selection().is_some()
+    }
+
+    pub fn clear_selection(&mut self) {
+        if self.doc.set_selection(None) {
+            self.dirty = Dirty::All;
+        }
+    }
+
+    /// 全选（当前可见内容包围盒范围）。
+    pub fn select_all(&mut self) {
+        let b = self
+            .visible_content_bounds()
+            .unwrap_or(Rect::new(0, 0, 1024, 1024));
+        self.select_rect(b, SelectionOp::Replace);
+    }
+
+    /// 矩形选区。
+    pub fn select_rect(&mut self, rect: Rect, op: SelectionOp) {
+        let mut grid = self.take_selection_for(op);
+        for y in rect.y as i64..rect.y2() {
+            for x in rect.x as i64..rect.x2() {
+                let tid = TileId::at(x, y);
+                let t = grid.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((y - oy) * 256 + (x - ox)) * 4) as usize;
+                t.pixels_mut()[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        self.doc.set_selection(Some(grid));
+        self.dirty = Dirty::All;
+    }
+
+    /// 套索（多边形）选区，画布坐标。扫描线填充。
+    pub fn select_lasso(&mut self, points: &[(f64, f64)], op: SelectionOp) {
+        let mut grid = self.take_selection_for(op);
+        if points.len() >= 3 {
+            let ys: Vec<f64> = points.iter().map(|p| p.1).collect();
+            let (y0, y1) = (
+                ys.iter().cloned().fold(f64::MAX, f64::min).floor() as i64,
+                ys.iter().cloned().fold(f64::MIN, f64::max).ceil() as i64,
+            );
+            let n = points.len();
+            for y in y0..y1 {
+                let cy = y as f64 + 0.5;
+                let mut xs = Vec::new();
+                for i in 0..n {
+                    let (ax, ay) = (points[i].0, points[i].1);
+                    let (bx, by) = (points[(i + 1) % n].0, points[(i + 1) % n].1);
+                    if (ay <= cy && by > cy) || (by <= cy && ay > cy) {
+                        let t = (cy - ay) / (by - ay);
+                        xs.push(ax + t * (bx - ax));
+                    }
+                }
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let it = xs.chunks(2);
+                for pair in it {
+                    if pair.len() == 2 {
+                        for x in pair[0].ceil() as i64..pair[1].ceil() as i64 {
+                            let tid = TileId::at(x, y);
+                            let t = grid.get_or_create_mut(tid);
+                            let (ox, oy) = tid.origin();
+                            let i = (((y - oy) * 256 + (x - ox)) * 4) as usize;
+                            if i + 3 < t.pixels_mut().len() {
+                                t.pixels_mut()[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.doc.set_selection(Some(grid));
+        self.dirty = Dirty::All;
+    }
+
+    fn take_selection_for(&mut self, op: SelectionOp) -> TileGrid {
+        let existing = self.doc.selection().cloned();
+        match (op, existing) {
+            (SelectionOp::Replace, _) | (_, None) => TileGrid::new(),
+            (SelectionOp::Add, Some(g)) => g,
+            (SelectionOp::Subtract, Some(g)) => g,
+        }
     }
 
     /// 给活动图层创建空蒙版（已有则移除）。返回是否启用。
@@ -685,13 +781,15 @@ impl Engine {
         }
         // 先取可变网格引用再交给渲染器（借用分离经临时层对象不可行，
         // 直接从 layer 取 &mut TileGrid）
+        let selection = self.doc.selection().cloned();
         let layer_ref = self.doc.layers_mut().get_mut(layer);
         let grid: &mut crate::tile::TileGrid = if self.tool == Tool::Mask {
             layer_ref.mask.get_or_insert_with(TileGrid::new)
         } else {
             &mut layer_ref.tiles
         };
-        self.renderer.stamp_dabs(grid, &dabs, &mut act.recorder);
+        self.renderer
+            .stamp_dabs(grid, &dabs, selection.as_ref(), &mut act.recorder);
         for dab in &dabs {
             self.expand_dirty(dab);
         }
@@ -802,6 +900,7 @@ mod tests {
             &mut self,
             _grid: &mut crate::tile::TileGrid,
             _dabs: &[Dab],
+            _clip: Option<&crate::tile::TileGrid>,
             _recorder: &mut StrokeRecorder,
         ) {
         }

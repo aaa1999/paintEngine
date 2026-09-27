@@ -54,7 +54,13 @@ fn main() {
 enum Drag {
     None,
     Stroke,
-    Pan { last: (f64, f64) },
+    Pan {
+        last: (f64, f64),
+    },
+    Select {
+        start: (f64, f64),
+        op: paint_core::SelectionOp,
+    },
 }
 
 struct App {
@@ -123,6 +129,10 @@ impl App {
         }
         self.engine
             .handle_event(PlatformEvent::Resize { w, h, scale });
+    }
+
+    fn dragging_stroke_modifier(&self) -> bool {
+        false
     }
 
     fn toggle_eraser(&mut self) {
@@ -289,6 +299,29 @@ impl ApplicationHandler for App {
                     let (dx, dy) = (self.cursor.0 - last.0, self.cursor.1 - last.1);
                     self.engine.document_mut().viewport_mut().pan_by(dx, dy);
                     self.drag = Drag::Pan { last: self.cursor };
+                } else if let Drag::Select { start, op } = self.drag {
+                    let (x0, y0) = start;
+                    let (x1, y1) = self.cursor;
+                    let rect = paint_core::Rect::new(
+                        x0.min(x1).floor() as i32,
+                        y0.min(y1).floor() as i32,
+                        (x1 - x0).abs().ceil().max(1.0) as u32,
+                        (y1 - y0).abs().ceil().max(1.0) as u32,
+                    );
+                    // 屏幕矩形 → 画布矩形
+                    let vp = self.engine.document().viewport();
+                    let (cx0, cy0) = vp.screen_to_canvas(rect.x as f64, rect.y as f64);
+                    let (cx1, cy1) = vp.screen_to_canvas(
+                        (rect.x + rect.w as i32) as f64,
+                        (rect.y + rect.h as i32) as f64,
+                    );
+                    let canvas_rect = paint_core::Rect::new(
+                        cx0.floor() as i32,
+                        cy0.floor() as i32,
+                        (cx1.ceil() - cx0.floor()) as u32,
+                        (cy1.ceil() - cy0.floor()) as u32,
+                    );
+                    self.engine.select_rect(canvas_rect, op);
                 } else if self.drag == Drag::Stroke {
                     let sample = self.pointer_sample();
                     self.engine.handle_event(PlatformEvent::Pointer {
@@ -299,7 +332,28 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => match (state, button) {
                 (ElementState::Pressed, MouseButton::Left) => {
-                    if self.space_down {
+                    if self.modifiers.control_key()
+                        && !self.modifiers.shift_key()
+                        && !self.modifiers.alt_key()
+                        && !self.space_down
+                        && self.dragging_stroke_modifier()
+                    {
+                        // 留给笔画（Ctrl+Z 等组合不受影响）——Ctrl 纯按住拖拽才选区
+                    }
+                    let ctrl_sel = self.modifiers.control_key() && !self.space_down;
+                    if ctrl_sel {
+                        let op = if self.modifiers.alt_key() {
+                            paint_core::SelectionOp::Subtract
+                        } else if self.modifiers.shift_key() {
+                            paint_core::SelectionOp::Add
+                        } else {
+                            paint_core::SelectionOp::Replace
+                        };
+                        self.drag = Drag::Select {
+                            start: self.cursor,
+                            op,
+                        };
+                    } else if self.space_down {
                         self.drag = Drag::Pan { last: self.cursor };
                     } else {
                         self.drag = Drag::Stroke;
@@ -311,7 +365,14 @@ impl ApplicationHandler for App {
                     }
                 }
                 (ElementState::Released, MouseButton::Left) => {
-                    if self.drag == Drag::Stroke {
+                    if let Drag::Select { start, .. } = self.drag {
+                        let empty = (self.cursor.0 - start.0).abs() < 2.0
+                            && (self.cursor.1 - start.1).abs() < 2.0;
+                        if empty {
+                            self.engine.clear_selection();
+                        }
+                        self.drag = Drag::None;
+                    } else if self.drag == Drag::Stroke {
                         let sample = self.pointer_sample();
                         self.engine.handle_event(PlatformEvent::Pointer {
                             phase: PointerPhase::Up,
@@ -404,6 +465,12 @@ impl ApplicationHandler for App {
                             }
                             "s" | "S" if ctrl => {
                                 self.save_ora();
+                            }
+                            "d" | "D" if ctrl => {
+                                self.engine.clear_selection();
+                            }
+                            "a" | "A" if ctrl => {
+                                self.engine.select_all();
                             }
                             "o" | "O" if ctrl => {
                                 self.open_ora();
