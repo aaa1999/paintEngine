@@ -232,6 +232,16 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 - 结构撤销：UndoOp 枚举（Tiles/InsertLayer/RemoveLayer/MoveLayer），逆序应用、逆操作自动捕获，redo 重放前向顺序。
 - 手势状态机在引擎内（壳层只转发原始触摸事件），桌面/移动端行为一致。
 
+### M2.7 无限画布体验（2026-09-27）
+
+引擎核心自 M1 起即为无限画布（稀疏瓦片、负坐标、无界平移），本轮补全用户可感知的部分：
+
+- [x] 点阵网格：空白区画布空间锚定的网格点（平移随动，传达空间感），间距在 256 倍数中自适应（屏幕间距 ≥ 32px），颜色随背景亮度取柔和对比；导出永远不带网格；`show_grid` 开关默认开（G 键 / 工具栏按钮）
+- [x] 适应内容（fit-to-content）：`TileGrid::content_bounds_precise` 像素精确包围盒 + `Viewport::fit_to` 内容中心对齐屏幕中心；平移迷路后的"回家"操作（Ctrl+0 / 适应内容按钮 / Android 适配按钮）；空画布 fit → 原点居中
+- [x] 100% 缩放（保持屏幕中心）：Ctrl+1
+- [x] Web 壳鼠标导航补全：滚轮锚点缩放、空格+左键/中键拖拽平移（此前 Web 端鼠标用户无法平移缩放）
+- [x] 浏览器实测：60 网格点精确命中、滚轮缩放生效、fit 后内容中心 (636.5,332) ≈ 屏幕中心 (640,337.5)、网格开关生效
+
 ### M3（P1 后半）：iOS / Android（Android 已完成，iOS 待议）
 
 - [ ] paint-ios：C ABI staticlib + Swift 薄壳（UIView 子类、Pencil 事件、Metal/CPU 呈现）——**待议**：方案与时点由后续讨论决定

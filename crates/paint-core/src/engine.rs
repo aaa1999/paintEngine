@@ -70,6 +70,7 @@ impl Engine {
         let background = config.background;
         let mut doc = Document::new(config.undo_memory_limit);
         doc.set_background(background);
+        doc.set_show_grid(true); // 无限画布空间指示，可经 set_show_graph 关闭
         Self {
             doc,
             renderer,
@@ -113,6 +114,46 @@ impl Engine {
 
     pub fn dirty(&self) -> Dirty {
         self.dirty
+    }
+
+    /// 空白区点阵网格开关（无限画布空间指示）。
+    pub fn show_grid(&self) -> bool {
+        self.doc.show_grid()
+    }
+
+    pub fn set_show_grid(&mut self, on: bool) {
+        self.doc.set_show_grid(on);
+        self.dirty = Dirty::All;
+    }
+
+    /// 100% 缩放，保持屏幕中心内容不动。
+    pub fn zoom_100(&mut self) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let z = self.doc.viewport().zoom();
+        self.doc
+            .viewport_mut()
+            .zoom_at((w as f64 / 2.0, h as f64 / 2.0), 1.0 / z);
+        self.dirty = Dirty::All;
+    }
+
+    /// 视野适配到全部可见内容（四周留 margin 屏幕像素）。
+    /// 无内容时回到原点居中、100% 缩放。平移丢失后的"回家"操作。
+    pub fn fit_to_content(&mut self, margin: f64) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        match self.visible_content_bounds() {
+            Some(b) => self
+                .doc
+                .viewport_mut()
+                .fit_to(b, (w as f64, h as f64), margin),
+            None => self.doc.viewport_mut().center_origin((w as f64, h as f64)),
+        }
+        self.dirty = Dirty::All;
     }
 
     // ── 图层结构 API（撤销走 Document 历史）──
@@ -301,13 +342,11 @@ impl Engine {
         Some(id)
     }
 
-    /// 可见图层内容包围盒（画布像素）。
+    /// 可见图层内容包围盒（像素精确；扫描成本 O 内容瓦片数）。
     pub fn visible_content_bounds(&self) -> Option<Rect> {
         let mut acc: Option<Rect> = None;
         for l in self.doc.layers().iter().filter(|l| l.visible) {
-            let mut grid = l.tiles.clone();
-            grid.prune();
-            if let Some(b) = grid.content_bounds() {
+            if let Some(b) = l.tiles.content_bounds_precise() {
                 acc = Some(match acc {
                     Some(a) => a.union(&b),
                     None => b,

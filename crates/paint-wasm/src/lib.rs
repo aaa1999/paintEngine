@@ -22,6 +22,8 @@ use paint_render::SoftwareRenderer;
 
 type PointerClosure = Closure<dyn FnMut(PointerEvent)>;
 type IdleClosure = Closure<dyn FnMut()>;
+type WheelClosure = Closure<dyn FnMut(web_sys::WheelEvent)>;
+type KeyClosure = Closure<dyn FnMut(web_sys::KeyboardEvent)>;
 
 struct Inner {
     engine: Engine,
@@ -29,6 +31,10 @@ struct Inner {
     ctx: CanvasRenderingContext2d,
     needs_render: Cell<bool>,
     last_size: Cell<(u32, u32)>,
+    // 壳层平移（空格拖拽 / 中键拖拽）——不动引擎笔画状态
+    panning: Cell<bool>,
+    pan_last: Cell<(f64, f64)>,
+    space_down: Cell<bool>,
 }
 
 #[wasm_bindgen]
@@ -36,6 +42,8 @@ pub struct PaintApp {
     inner: Rc<RefCell<Inner>>,
     /// 事件闭包必须保活（Drop 即解绑）
     keep: RefCell<Vec<PointerClosure>>,
+    wheel_keep: RefCell<Vec<WheelClosure>>,
+    key_keep: RefCell<Vec<KeyClosure>>,
     hover_keep: RefCell<Vec<IdleClosure>>,
     raf_keep: RefCell<Option<Rc<RefCell<Option<IdleClosure>>>>>,
     observer: RefCell<Option<ResizeObserver>>,
@@ -57,11 +65,16 @@ impl PaintApp {
             ctx,
             needs_render: Cell::new(true),
             last_size: Cell::new((0, 0)),
+            panning: Cell::new(false),
+            pan_last: Cell::new((0.0, 0.0)),
+            space_down: Cell::new(false),
         }));
 
         let app = PaintApp {
             inner: inner.clone(),
             keep: RefCell::new(Vec::new()),
+            wheel_keep: RefCell::new(Vec::new()),
+            key_keep: RefCell::new(Vec::new()),
             hover_keep: RefCell::new(Vec::new()),
             raf_keep: RefCell::new(None),
             observer: RefCell::new(None),
@@ -152,6 +165,29 @@ impl PaintApp {
         self.inner.borrow().engine.document().layers().len()
     }
 
+    /// 视野适配到全部内容（无限画布导航：迷路后"回家"）。
+    pub fn fit_to_content(&self) {
+        self.mark_render(|e| {
+            e.fit_to_content(48.0);
+            true
+        });
+    }
+
+    /// 100% 缩放（保持屏幕中心不动）。
+    pub fn zoom_100(&self) {
+        self.mark_render(|e| {
+            e.zoom_100();
+            true
+        });
+    }
+
+    pub fn set_show_grid(&self, on: bool) {
+        self.mark_render(|e| {
+            e.set_show_grid(on);
+            true
+        });
+    }
+
     // ── 内部：事件绑定与渲染循环 ──
 
     fn mark_render(&self, f: impl FnOnce(&mut Engine) -> bool) -> bool {
@@ -206,6 +242,50 @@ impl PaintApp {
         self.keep
             .borrow_mut()
             .extend([down, up, cancel, raw_move, move_evt]);
+
+        // 滚轮缩放（以光标为锚）
+        {
+            let inner_wheel = inner.clone();
+            let wheel = WheelClosure::new(move |e: web_sys::WheelEvent| {
+                e.prevent_default();
+                let rect = inner_wheel.borrow().canvas.get_bounding_client_rect();
+                let dpr = web_sys::window()
+                    .map(|w| w.device_pixel_ratio())
+                    .unwrap_or(1.0);
+                let pos = (
+                    (e.client_x() as f64 - rect.left()) * dpr,
+                    (e.client_y() as f64 - rect.top()) * dpr,
+                );
+                let factor = if e.delta_y() < 0.0 { 1.1 } else { 1.0 / 1.1 };
+                let mut i = inner_wheel.borrow_mut();
+                i.engine.document_mut().viewport_mut().zoom_at(pos, factor);
+                i.needs_render.set(true);
+            });
+            target.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())?;
+            self.wheel_keep.borrow_mut().push(wheel);
+        }
+
+        // 空格平移修饰键
+        if let Some(win) = web_sys::window() {
+            let inner_key = inner.clone();
+            let keydown = KeyClosure::new(move |e: web_sys::KeyboardEvent| {
+                if e.code() == "Space" {
+                    inner_key.borrow_mut().space_down.set(true);
+                    e.prevent_default();
+                }
+            });
+            let inner_key2 = inner.clone();
+            let keyup = KeyClosure::new(move |e: web_sys::KeyboardEvent| {
+                if e.code() == "Space" {
+                    inner_key2.borrow_mut().space_down.set(false);
+                }
+            });
+            win.add_event_listener_with_callback("keydown", keydown.as_ref().unchecked_ref())?;
+            win.add_event_listener_with_callback("keyup", keyup.as_ref().unchecked_ref())?;
+            self.key_keep.borrow_mut().push(keydown);
+            self.key_keep.borrow_mut().push(keyup);
+        }
+
         Ok(())
     }
 
@@ -257,6 +337,10 @@ impl PaintApp {
     }
 }
 
+fn i_am_pan(inner: &Rc<RefCell<Inner>>) -> bool {
+    inner.borrow().panning.get()
+}
+
 fn dispatch(inner: &Rc<RefCell<Inner>>, phase: PointerPhase, e: &PointerEvent) {
     let dpr = web_sys::window()
         .map(|w| w.device_pixel_ratio())
@@ -270,6 +354,46 @@ fn dispatch(inner: &Rc<RefCell<Inner>>, phase: PointerPhase, e: &PointerEvent) {
         "touch" => PointerKind::Touch,
         _ => PointerKind::Mouse,
     };
+
+    // 鼠标平移：空格+左键 或 中键拖拽（触摸平移走引擎双指手势）
+    if kind == PointerKind::Mouse {
+        let pos = (
+            (e.client_x() as f64 - rect.left()) * dpr,
+            (e.client_y() as f64 - rect.top()) * dpr,
+        );
+        match phase {
+            PointerPhase::Down => {
+                let i = inner.borrow();
+                if (i.space_down.get() || e.button() == 1) && e.pointer_type().as_str() == "mouse" {
+                    drop(i);
+                    let i = inner.borrow_mut();
+                    i.panning.set(true);
+                    i.pan_last.set(pos);
+                    i.needs_render.set(true);
+                    return;
+                }
+            }
+            PointerPhase::Move => {
+                if i_am_pan(inner) {
+                    let (lx, ly) = inner.borrow().pan_last.get();
+                    let mut i = inner.borrow_mut();
+                    i.engine
+                        .document_mut()
+                        .viewport_mut()
+                        .pan_by(pos.0 - lx, pos.1 - ly);
+                    i.pan_last.set(pos);
+                    i.needs_render.set(true);
+                    return;
+                }
+            }
+            PointerPhase::Up | PointerPhase::Cancel => {
+                if inner.borrow().panning.get() {
+                    inner.borrow_mut().panning.set(false);
+                    return;
+                }
+            }
+        }
+    }
 
     // 悬停（无按键）：仅用数位笔悬停驱动手掌拒绝，不产生笔画事件
     if e.buttons() == 0 {

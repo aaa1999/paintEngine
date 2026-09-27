@@ -155,6 +155,7 @@ fn merge_down_flatten_flow() {
 #[test]
 fn png_export_import_roundtrip() {
     let (mut e, mut s) = engine();
+    e.set_show_grid(false); // 屏幕默认带网格点，导出不带；关掉做逐像素对比
     draw(&mut e, 10.0, 50.0, 32.0);
     let frame_before = frame(&mut e, &mut s);
 
@@ -184,6 +185,25 @@ fn png_export_import_roundtrip() {
     assert!(e.undo());
     assert_eq!(e.document().layers().len(), 1);
     assert!(!e.document().layers().contains(lid));
+}
+
+#[test]
+fn fit_to_content_brings_lost_content_back() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 44.0, 32.0);
+    let base = ink_count(&frame(&mut e, &mut s));
+    assert!(base > 0);
+
+    // 平移到"迷路"：内容完全移出视野
+    e.document_mut().viewport_mut().pan_by(5000.0, 5000.0);
+    assert_eq!(ink_count(&frame(&mut e, &mut s)), 0, "内容移出视野");
+
+    // 适应内容：回到全部墨迹
+    e.fit_to_content(8.0);
+    let back = ink_count(&frame(&mut e, &mut s));
+    assert!(back > 0, "fit 后内容回到视野");
+    let z = e.document().viewport().zoom();
+    assert!((0.9..2.0).contains(&z), "适配缩放合理: {z}");
 }
 
 #[test]

@@ -180,7 +180,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes().with_title(
-            "paintEngine — 左键画/右键擦 · B/E 工具 · Ctrl+Z 撤销 · Ctrl+Shift+N 图层 · Ctrl+E 合并 · Ctrl+S 导出",
+            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · Ctrl+Z 撤销",
         );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -337,6 +337,16 @@ impl ApplicationHandler for App {
                             }
                             "s" | "S" if ctrl => {
                                 self.save_png();
+                            }
+                            "0" if ctrl => {
+                                self.engine.fit_to_content(48.0);
+                            }
+                            "1" if ctrl => {
+                                self.engine.zoom_100();
+                            }
+                            "g" | "G" => {
+                                let on = !self.engine.show_grid();
+                                self.engine.set_show_grid(on);
                             }
                             "e" | "E" if !ctrl => {
                                 // B/E 在画笔/橡皮间切换

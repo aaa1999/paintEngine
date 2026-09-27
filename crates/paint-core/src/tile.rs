@@ -121,6 +121,39 @@ impl TileGrid {
         before - self.tiles.len()
     }
 
+    /// 像素精确的内容包围盒（扫描非透明像素）。O(内容瓦片数 × 瓦片)，
+    /// 用户触发的"适应内容"等操作用；常态路径用瓦片粒度的 [`Self::content_bounds`]。
+    pub fn content_bounds_precise(&self) -> Option<Rect> {
+        let mut acc: Option<(i64, i64, i64, i64)> = None; // minx, miny, maxx, maxy（含）
+        for (id, tile) in self.tiles.iter() {
+            let px = tile.pixels();
+            let (ox, oy) = (id.origin().0, id.origin().1);
+            for y in 0..TILE as usize {
+                let row = &px[y * TILE as usize * 4..][..TILE as usize * 4];
+                if row.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+                    continue;
+                }
+                for x in 0..TILE as usize {
+                    if row[x * 4 + 3] != 0 {
+                        let (gx, gy) = (ox + x as i64, oy + y as i64);
+                        acc = Some(match acc {
+                            None => (gx, gy, gx, gy),
+                            Some((a, b, c, d)) => (a.min(gx), b.min(gy), c.max(gx), d.max(gy)),
+                        });
+                    }
+                }
+            }
+        }
+        acc.map(|(x0, y0, x1, y1)| {
+            Rect::new(
+                x0 as i32,
+                y0 as i32,
+                (x1 - x0 + 1) as u32,
+                (y1 - y0 + 1) as u32,
+            )
+        })
+    }
+
     /// 已存瓦片的包围盒（画布像素）。调用方应先 `prune` 保证无空瓦片。
     pub fn content_bounds(&self) -> Option<Rect> {
         let mut min = (i32::MAX, i32::MAX);

@@ -33,6 +33,9 @@ pub fn composite(
 
     if let Some(bg) = background {
         paint_background(bg, target, width, &clip);
+        if doc.show_grid() {
+            paint_grid(doc, target, width, &clip);
+        }
     }
 
     let vp = doc.viewport();
@@ -168,6 +171,56 @@ fn bilerp_idx(f: f64) -> (f32, f32, usize, usize) {
     let i1c = (i0 + 1).clamp(0, 255) as usize;
     let t = (f - i0 as f64).clamp(0.0, 1.0) as f32;
     (1.0 - t, t, i0c, i1c)
+}
+
+/// 空白区点阵网格：锚定画布空间（平移时随之移动，传达无限空间感），
+/// 间距在 256 的倍数中自适应（屏幕间距 ≥ 32px），颜色随背景亮度
+/// 取柔和对比。只在背景绘制阶段叠加，图层内容覆盖其上。
+fn paint_grid(doc: &Document, target: &mut [u8], width: u32, clip: &Rect) {
+    let vp = doc.viewport();
+    let zoom = vp.zoom();
+    let (pan_x, pan_y) = vp.pan();
+
+    let mut spacing = 256.0f64;
+    while spacing * zoom < 32.0 {
+        spacing *= 2.0;
+    }
+
+    let bg = doc.background();
+    let lum = 0.299 * bg.r as f32 + 0.587 * bg.g as f32 + 0.114 * bg.b as f32;
+    let mix = |c: u8| -> u8 {
+        if lum >= 128.0 {
+            ((c as u16 * 205) / 255) as u8 // 亮底 → 深点
+        } else {
+            (c as u16 + ((255 - c as u16) * 45) / 255) as u8 // 暗底 → 浅点
+        }
+    };
+    let (dr, dg, db) = (mix(bg.r), mix(bg.g), mix(bg.b));
+
+    let (cx0, cy0) = vp.screen_to_canvas(clip.x as f64, clip.y as f64);
+    let (cx1, cy1) = vp.screen_to_canvas(clip.x2() as f64, clip.y2() as f64);
+
+    let mut cy = (cy0 / spacing).floor() * spacing;
+    while cy <= cy1 {
+        let sy = (cy * zoom + pan_y).round() as i64;
+        if sy >= clip.y as i64 && sy < clip.y2() {
+            let mut cx = (cx0 / spacing).floor() * spacing;
+            while cx <= cx1 {
+                let sx = (cx * zoom + pan_x).round() as i64;
+                if sx >= clip.x as i64 && sx < clip.x2() {
+                    let i = ((sy as u32 * width) as usize + sx as usize) * 4;
+                    if i + 3 < target.len() {
+                        target[i] = dr;
+                        target[i + 1] = dg;
+                        target[i + 2] = db;
+                        target[i + 3] = 255;
+                    }
+                }
+                cx += spacing;
+            }
+        }
+        cy += spacing;
+    }
 }
 
 fn paint_background(bg: Color, target: &mut [u8], width: u32, clip: &Rect) {
@@ -366,6 +419,49 @@ mod tests {
             .filter(|&v| v > 0 && v < 255)
             .collect();
         assert!(!grads.is_empty(), "放大边缘应有渐变像素");
+    }
+
+    #[test]
+    fn dot_grid_anchors_to_canvas() {
+        let mut doc = Document::new(usize::MAX);
+        doc.set_background(Color::WHITE);
+        doc.set_show_grid(true);
+        let w = 300u32;
+        let full = Rect::new(0, 0, w, w);
+        let mut frame = vec![255u8; (w * w * 4) as usize];
+        composite(&doc, &mut frame, w, full, Some(doc.background()));
+        // 画布 (256,256) 网格点 → 屏幕 (256,256)，白底深点；(0,0) 也是网格点
+        assert_eq!(px(&frame, w, 256, 256), [205, 205, 205, 255], "网格点");
+        assert_eq!(px(&frame, w, 0, 0), [205, 205, 205, 255], "原点网格点");
+        assert_eq!(
+            px(&frame, w, 255, 255),
+            [255, 255, 255, 255],
+            "非网格点保持背景"
+        );
+        // 平移 +37：网格点随之移动（画布空间锚定，传达空间感）
+        doc.viewport_mut().pan_by(37.0, 0.0);
+        composite(&doc, &mut frame, w, full, Some(doc.background()));
+        assert_eq!(
+            px(&frame, w, 256 + 37, 256),
+            [205, 205, 205, 255],
+            "网格随平移移动"
+        );
+        // 关闭后无网格
+        doc.set_show_grid(false);
+        composite(&doc, &mut frame, w, full, Some(doc.background()));
+        assert_eq!(px(&frame, w, 256 + 37, 256), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn grid_absent_on_transparent_export_path() {
+        let mut doc = Document::new(usize::MAX);
+        doc.set_background(Color::WHITE);
+        doc.set_show_grid(true);
+        let w = 300u32;
+        let mut frame = vec![0u8; (w * w * 4) as usize];
+        // 导出走 background: None —— 不应有网格
+        composite(&doc, &mut frame, w, Rect::new(0, 0, w, w), None);
+        assert_eq!(px(&frame, w, 256, 256), [0, 0, 0, 0], "透明导出无网格点");
     }
 
     #[test]

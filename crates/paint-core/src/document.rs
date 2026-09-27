@@ -9,6 +9,9 @@ pub struct Document {
     viewport: Viewport,
     history: History,
     background: Color,
+    /// 空白区点阵网格（无限画布的空间指示）。仅屏幕合成使用；
+    /// 导出走独立文档，不受此开关影响。
+    show_grid: bool,
 }
 
 impl Document {
@@ -21,16 +24,19 @@ impl Document {
             viewport: Viewport::new(),
             history: History::new(undo_memory_limit),
             background: Color::WHITE,
+            show_grid: false,
         }
     }
 
-    /// 以既有图层栈构造（导出用临时文档等场合）。
+    /// 以既有图层栈构造（导出用临时文档等场合）。默认不带网格，
+    /// 保证导出画面干净。
     pub fn with_layers(layers: LayerStack) -> Self {
         Self {
             layers,
             viewport: Viewport::new(),
             history: History::new(usize::MAX),
             background: Color::WHITE,
+            show_grid: false,
         }
     }
 
@@ -72,6 +78,14 @@ impl Document {
 
     pub fn set_background(&mut self, c: Color) {
         self.background = c;
+    }
+
+    pub fn show_grid(&self) -> bool {
+        self.show_grid
+    }
+
+    pub fn set_show_grid(&mut self, on: bool) {
+        self.show_grid = on;
     }
 
     /// 提交撤销组（一笔结束、一次图层操作）。

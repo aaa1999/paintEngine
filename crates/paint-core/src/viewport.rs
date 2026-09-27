@@ -1,3 +1,5 @@
+use crate::geometry::Rect;
+
 /// 视口：画布坐标 ↔ 屏幕物理像素的换算。
 /// M1 仅平移+缩放；旋转/翻转（P2）只动这个模块。
 ///
@@ -69,6 +71,28 @@ impl Viewport {
         }
     }
 
+    /// 视野适配：把 `content`（画布像素矩形）缩放平移到 `screen` 尺寸内，
+    /// 四周留 `margin` 屏幕像素。无限画布导航的核心操作。
+    pub fn fit_to(&mut self, content: Rect, screen: (f64, f64), margin: f64) {
+        let cw = content.w.max(1) as f64;
+        let ch = content.h.max(1) as f64;
+        let avail_w = (screen.0 - margin * 2.0).max(1.0);
+        let avail_h = (screen.1 - margin * 2.0).max(1.0);
+        self.zoom = (avail_w / cw).min(avail_h / ch).clamp(MIN_ZOOM, MAX_ZOOM);
+        // 内容中心对齐屏幕中心
+        self.pan_x = screen.0 / 2.0 - (content.x as f64 + cw / 2.0) * self.zoom;
+        self.pan_y = screen.1 / 2.0 - (content.y as f64 + ch / 2.0) * self.zoom;
+        self.rev += 1;
+    }
+
+    /// 画布原点 (0,0) 居中、100% 缩放（空画布的合理初始视野）。
+    pub fn center_origin(&mut self, screen: (f64, f64)) {
+        self.zoom = 1.0;
+        self.pan_x = screen.0 / 2.0;
+        self.pan_y = screen.1 / 2.0;
+        self.rev += 1;
+    }
+
     pub fn screen_to_canvas(&self, x: f64, y: f64) -> (f64, f64) {
         ((x - self.pan_x) / self.zoom, (y - self.pan_y) / self.zoom)
     }
@@ -102,6 +126,30 @@ mod tests {
         let after = vp.screen_to_canvas(anchor.0, anchor.1);
         assert!((before.0 - after.0).abs() < 1e-9);
         assert!((before.1 - after.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fit_to_centers_and_scales() {
+        let mut vp = Viewport::new();
+        // 内容 200x100，位于画布 (1000, 2000)
+        vp.fit_to(Rect::new(1000, 2000, 200, 100), (800.0, 600.0), 50.0);
+        // 可用 700x500 → zoom = min(700/200, 500/100) = 3.5
+        assert!((vp.zoom() - 3.5).abs() < 1e-9);
+        let (cx, cy) = vp.screen_to_canvas(400.0, 300.0); // 屏幕中心
+        assert!(
+            (cx - 1100.0).abs() < 1e-9 && (cy - 2050.0).abs() < 1e-9,
+            "内容中心应在屏幕中心: {cx},{cy}"
+        );
+    }
+
+    #[test]
+    fn center_origin_puts_origin_at_center() {
+        let mut vp = Viewport::new();
+        vp.pan_by(-500.0, 300.0);
+        vp.center_origin((800.0, 600.0));
+        assert_eq!(vp.zoom(), 1.0);
+        let (cx, cy) = vp.screen_to_canvas(400.0, 300.0);
+        assert!(cx.abs() < 1e-9 && cy.abs() < 1e-9);
     }
 
     #[test]

@@ -41,6 +41,7 @@ class MainActivity : AppCompatActivity() {
         toolbar.addView(button("撤销") { paintView.undo(); paintView.invalidate() })
         toolbar.addView(button("重做") { paintView.redo(); paintView.invalidate() })
         toolbar.addView(button("图层") { paintView.addLayer(); paintView.invalidate() })
+        toolbar.addView(button("适配") { paintView.fitToContent(); paintView.invalidate() })
         toolbar.addView(button("保存") { savePng() })
 
         val root = LinearLayout(this).apply {

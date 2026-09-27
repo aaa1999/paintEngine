@@ -59,6 +59,20 @@ $("flatten").onclick = () => app.flatten();
 $("undo").onclick = () => app.undo();
 $("redo").onclick = () => app.redo();
 
+// 无限画布导航
+$("fit").onclick = () => app.fit_to_content();
+$("grid").onclick = () => {
+  gridOn = !gridOn;
+  app.set_show_grid(gridOn);
+  $("grid").classList.toggle("active", gridOn);
+};
+let gridOn = true;
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "0") { e.preventDefault(); app.fit_to_content(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === "1") { e.preventDefault(); app.zoom_100(); }
+  if (e.key === "g" || e.key === "G") $("grid").click();
+});
+
 // 导入导出
 $("export").onclick = () => {
   const bytes = app.export_png();

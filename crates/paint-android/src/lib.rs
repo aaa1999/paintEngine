@@ -245,6 +245,34 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFlatte
     engine(handle).flatten() as jboolean
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFitToContent(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    engine(handle).fit_to_content(48.0);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeZoom100(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) {
+    engine(handle).zoom_100();
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetShowGrid(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    show: jboolean,
+) {
+    engine(handle).set_show_grid(show != 0);
+}
+
 /// 导出 PNG（可见内容包围盒，透明背景）。
 #[no_mangle]
 pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeExportPng(
