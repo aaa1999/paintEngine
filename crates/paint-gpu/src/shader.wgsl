@@ -82,7 +82,14 @@ struct TileU {
     mode: u32,
     has_mask: f32,
     has_parent: f32,
+    f2l_a: f32,
+    f2l_b: f32,
+    f2l_c: f32,
+    f2l_d: f32,
+    f2l_e: f32,
+    f2l_f: f32,
     pad: vec2<f32>,
+    pad2: vec2<f32>,
 };
 @group(1) @binding(0) var TILE_TEX: texture_2d<f32>;
 @group(1) @binding(1) var TILE_SAMP: sampler;
@@ -142,7 +149,11 @@ fn fs_tile(in: Vout) -> @location(0) vec4<f32> {
     let px = floor(in.pos.x);
     let py_top = floor(in.pos.y);
     let canvas = canvas_coord(px, py_top, T_VP);
-    let local = canvas - TILE_U.origin;
+    // 画布 → 瓦片局部（仿射；普通瓦片为平移 -origin，浮动瓦片为复合逆仿射）
+    let local = vec2<f32>(
+        TILE_U.f2l_a * canvas.x + TILE_U.f2l_b * canvas.y + TILE_U.f2l_e,
+        TILE_U.f2l_c * canvas.x + TILE_U.f2l_d * canvas.y + TILE_U.f2l_f,
+    );
     // 瓦片边界外由 scissor 裁剪；此处兜底
     if (local.x < 0.0 || local.y < 0.0 || local.x >= 256.0 || local.y >= 256.0) {
         discard;

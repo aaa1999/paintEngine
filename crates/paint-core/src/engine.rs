@@ -75,6 +75,8 @@ pub struct Engine {
     gesture: Option<Gesture>,
     /// 手势闩锁：手势触发后，剩余手指抬完前不再起笔画
     gesture_latch: bool,
+    /// 内容级变换的撤销采集器（begin→commit 存活）。
+    transform_recorder: Option<StrokeRecorder>,
 }
 
 impl Engine {
@@ -97,6 +99,7 @@ impl Engine {
             touches: HashMap::new(),
             gesture: None,
             gesture_latch: false,
+            transform_recorder: None,
         }
     }
 
@@ -261,6 +264,229 @@ impl Engine {
             self.dirty = Dirty::All;
         }
         r
+    }
+
+    // ── 内容级变换（选区或整层的移动/旋转/缩放，浮动预览）──
+
+    pub fn transforming(&self) -> bool {
+        self.doc.floating().is_some()
+    }
+
+    /// 开始变换：提升选中内容（无选区则整层内容）为浮动层。
+    /// 进行中忽略笔画与撤销；提交/取消后恢复。
+    pub fn begin_transform(&mut self) -> bool {
+        if self.transforming() {
+            return false;
+        }
+        let layer = match self.doc.layers().try_active() {
+            Some(l) => l,
+            None => return false,
+        };
+        let sel = self.doc.selection().cloned();
+        // 提升范围：选区瓦片范围；无选区时图层内容范围
+        let bbox = match (
+            &sel,
+            self.doc.layers().get(layer).tiles.content_bounds_precise(),
+        ) {
+            (Some(_), _) => self.doc.selection().and_then(|g| g.content_bounds()),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(bbox) = bbox else { return false };
+
+        let mut float_tiles = TileGrid::new();
+        let mut recorder = StrokeRecorder::new(layer);
+        {
+            let l = self.doc.layers_mut().get_mut(layer);
+            let x0 = (bbox.x as i64 >> 8) - 1;
+            let y0 = (bbox.y as i64 >> 8) - 1;
+            let x1 = ((bbox.x as i64 + bbox.w as i64) >> 8) + 1;
+            let y1 = ((bbox.y as i64 + bbox.h as i64) >> 8) + 1;
+            for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    let id = TileId {
+                        x: tx as i32,
+                        y: ty as i32,
+                    };
+                    let Some(src) = l.tiles.get(id).cloned() else {
+                        continue;
+                    };
+                    let sp = src.pixels();
+                    let ft = float_tiles.get_or_create_mut(id);
+                    let fp = ft.pixels_mut();
+                    let mut any = false;
+                    for i in 0..fp.len() / 4 {
+                        let sel_v = match &sel {
+                            Some(g) => g.get(id).map(|t| t.pixels()[i * 4] > 127).unwrap_or(false),
+                            None => sp[i * 4 + 3] > 0,
+                        };
+                        if sel_v && sp[i * 4 + 3] > 0 {
+                            any = true;
+                            fp[i * 4..i * 4 + 4].copy_from_slice(&sp[i * 4..i * 4 + 4]);
+                        }
+                    }
+                    if any {
+                        // 清除图层中被提升的像素（整块重写为透明）
+                        recorder.capture(&l.tiles, id);
+                        let t = l.tiles.get_or_create_mut(id);
+                        let lp = t.pixels_mut();
+                        for i in 0..lp.len() / 4 {
+                            let sel_v = match &sel {
+                                Some(g) => {
+                                    g.get(id).map(|t| t.pixels()[i * 4] > 127).unwrap_or(false)
+                                }
+                                None => sp[i * 4 + 3] > 0,
+                            };
+                            if sel_v {
+                                lp[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]);
+                            }
+                        }
+                    }
+                }
+            }
+            l.tiles.prune();
+        }
+        if float_tiles.is_empty() {
+            return false; // 空内容
+        }
+        let pivot = (
+            bbox.x as f64 + bbox.w as f64 / 2.0,
+            bbox.y as f64 + bbox.h as f64 / 2.0,
+        );
+        self.doc.set_floating(Some(crate::float::Floating {
+            tiles: float_tiles,
+            layer,
+            affine: crate::float::Affine2::IDENTITY,
+            pivot,
+        }));
+        self.transform_recorder = Some(recorder);
+        self.dirty = Dirty::All;
+        true
+    }
+
+    pub fn transform_translate(&mut self, dx: f64, dy: f64) {
+        if let Some(f) = self.doc.floating_mut() {
+            f.translate(dx, dy);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    pub fn transform_rotate(&mut self, delta_rad: f64) {
+        if let Some(f) = self.doc.floating_mut() {
+            f.rotate(delta_rad);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    pub fn transform_scale(&mut self, factor: f64) {
+        if let Some(f) = self.doc.floating_mut() {
+            f.scale(factor);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    /// 提交：按累积仿射盖章回图层（整组入撤销）。
+    pub fn commit_transform(&mut self) -> bool {
+        let Some(fl) = self.doc.floating().cloned() else {
+            return false;
+        };
+        let Some(mut recorder) = self.transform_recorder.take() else {
+            return false;
+        };
+        self.doc.set_floating(None);
+        let inv = fl.affine.invert();
+        // 目标范围：浮动 bbox（画布）逐瓦片
+        let Some(bbox) = fl.canvas_bbox() else {
+            self.doc.commit(recorder.finish("Transform"));
+            self.dirty = Dirty::All;
+            return true;
+        };
+        let layer = fl.layer;
+        let l = self.doc.layers_mut().get_mut(layer);
+        let x0 = (bbox.x as i64 >> 8) - 1;
+        let y0 = (bbox.y as i64 >> 8) - 1;
+        let x1 = ((bbox.x as i64 + bbox.w as i64) >> 8) + 1;
+        let y1 = ((bbox.y as i64 + bbox.h as i64) >> 8) + 1;
+        for ty in y0..=y1 {
+            for tx in x0..=x1 {
+                let id = TileId {
+                    x: tx as i32,
+                    y: ty as i32,
+                };
+                let (ox, oy) = id.origin();
+                // 逐像素：目标画布 → 逆仿射 → 源瓦片采样（最近邻）
+                let mut rows: Vec<(usize, usize, [u8; 4])> = Vec::new();
+                for py in 0..crate::tile::TILE as i64 {
+                    for px in 0..crate::tile::TILE as i64 {
+                        let (cx, cy) = (ox as f64 + px as f64 + 0.5, oy as f64 + py as f64 + 0.5);
+                        let (sx, sy) = inv.apply(cx, cy);
+                        let sid = TileId::at(sx.floor() as i64, sy.floor() as i64);
+                        let Some(st) = fl.tiles.get(sid) else {
+                            continue;
+                        };
+                        let (sox, soy) = sid.origin();
+                        let lx = (sx.floor() as i64 - sox) as usize;
+                        let ly = (sy.floor() as i64 - soy) as usize;
+                        if lx >= 256 || ly >= 256 {
+                            continue;
+                        }
+                        let p = &st.pixels()[(ly * 256 + lx) * 4..][..4];
+                        if p[3] == 0 {
+                            continue;
+                        }
+                        rows.push((py as usize, px as usize, [p[0], p[1], p[2], p[3]]));
+                    }
+                }
+                if rows.is_empty() {
+                    continue;
+                }
+                recorder.capture(&l.tiles, id);
+                let tile = l.tiles.get_or_create_mut(id);
+                for (py, px, p) in rows {
+                    let i = (py * crate::tile::TILE as usize + px) * 4;
+                    // source-over（预乘）
+                    let sa = p[3] as f32 / 255.0;
+                    let da = tile.pixels()[i + 3] as f32 / 255.0;
+                    let oa = sa + da * (1.0 - sa);
+                    let tp = tile.pixels_mut();
+                    for k in 0..3 {
+                        tp[i + k] = (p[k] as f32 + tp[i + k] as f32 * (1.0 - sa)) as u8;
+                    }
+                    tp[i + 3] = (oa * 255.0 + 0.5) as u8;
+                }
+            }
+        }
+        l.tiles.prune();
+        self.doc.commit(recorder.finish("Transform"));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    /// 取消：浮动内容按恒等仿射放回原位（内容零变化，不入撤销）。
+    pub fn cancel_transform(&mut self) -> bool {
+        let Some(fl) = self.doc.floating().cloned() else {
+            return false;
+        };
+        self.transform_recorder = None; // 丢弃提升时的采集——撤销组不完整，但取消本身是净零操作，
+                                        // 原像素即将被写回，净效果等于从未发生
+        self.doc.set_floating(None);
+        let layer = fl.layer;
+        let l = self.doc.layers_mut().get_mut(layer);
+        for id in fl.tiles.ids().collect::<Vec<_>>() {
+            let Some(src) = fl.tiles.get(id) else {
+                continue;
+            };
+            let sp = src.pixels();
+            let tile = l.tiles.get_or_create_mut(id);
+            let tp = tile.pixels_mut();
+            for i in 0..tp.len() / 4 {
+                if sp[i * 4 + 3] > 0 {
+                    tp[i * 4..i * 4 + 4].copy_from_slice(&sp[i * 4..i * 4 + 4]);
+                }
+            }
+        }
+        self.dirty = Dirty::All;
+        true
     }
 
     // ── 文字与矢量形状（写入活动图层，入撤销历史）──
@@ -741,6 +967,9 @@ impl Engine {
     }
 
     pub fn undo(&mut self) -> bool {
+        if self.transforming() {
+            return false; // 变换未提交前不动历史（提交时整组入史）
+        }
         if self.doc.undo() {
             self.dirty = Dirty::All;
             true
@@ -750,6 +979,9 @@ impl Engine {
     }
 
     pub fn redo(&mut self) -> bool {
+        if self.transforming() {
+            return false;
+        }
         if self.doc.redo() {
             self.dirty = Dirty::All;
             true
@@ -770,6 +1002,10 @@ impl Engine {
     }
 
     fn on_stylus(&mut self, phase: PointerPhase, sample: PointerSample) {
+        // 内容级变换中：输入由壳层驱动仿射，忽略笔画
+        if self.transforming() {
+            return;
+        }
         // 笔落下即接管：清除进行中的触摸手势
         if phase == PointerPhase::Down && (!self.touches.is_empty() || self.gesture.is_some()) {
             self.cancel_stroke();

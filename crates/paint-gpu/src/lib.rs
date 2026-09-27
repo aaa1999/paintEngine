@@ -53,7 +53,11 @@ struct TileUniform {
     mode: u32,
     has_mask: f32,
     has_parent: f32,
+    /// 画布→瓦片局部仿射（6 分量；普通瓦片 = 平移 -origin，
+    /// 浮动瓦片 = 视口外再复合浮动逆仿射）
+    f2l: [f32; 6],
     pad: [f32; 2],
+    pad2: [f32; 2],
 }
 
 struct CachedTile {
@@ -602,6 +606,16 @@ impl Renderer for WgpuRenderer {
         for (l, id, t) in &mask_uploads {
             self.tile_texture(*l, 1, *id, t);
         }
+        // 浮动瓦片上传（通道 2）
+        let mut float_uploads: Vec<(u64, TileId, Arc<paint_core::tile::TileData>)> = Vec::new();
+        if let Some(fl) = doc.floating() {
+            for (id, t) in fl.tiles.iter_entries() {
+                float_uploads.push((u64::MAX, id, t.clone()));
+            }
+        }
+        for (l, id, t) in &float_uploads {
+            self.tile_texture(*l, 2, *id, t);
+        }
 
         // 与 CPU 同规则：旋转/翻转下走最近邻（双线性邻域跨瓦片有接缝）
         let bilinear = zoom > 1.0 && vp.transform_ident();
@@ -758,7 +772,9 @@ impl Renderer for WgpuRenderer {
                                 mode: mode_idx,
                                 has_mask: if layer.mask.is_some() { 1.0 } else { 0.0 },
                                 has_parent: if parent.is_some() { 1.0 } else { 0.0 },
+                                f2l: [1.0, 0.0, 0.0, 1.0, -(tx << 8) as f32, -(ty << 8) as f32],
                                 pad: [0.0; 2],
+                                pad2: [0.0; 2],
                             }),
                             usage: wgpu::BufferUsages::UNIFORM,
                         });
@@ -820,6 +836,150 @@ impl Renderer for WgpuRenderer {
                     scissor(&mut pass, &sc);
                     pass.draw(0..3, 0..1);
                 }
+            }
+            self.accum_cur = next;
+        }
+
+        // 2.5) 浮动层（内容级变换预览）：Normal/不透明/最近邻
+        if let Some(fl) = doc.floating() {
+            let next = 1 - self.accum_cur;
+            let dst_tex = self.accum[next].as_ref().unwrap().clone();
+            let src_tex = self.accum[self.accum_cur].as_ref().unwrap().clone();
+            {
+                let view = dst_tex.create_view(&Default::default());
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("float-copy"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.copy_pipeline);
+                pass.set_bind_group(0, &self.copy_bind(&src_tex), &[]);
+                scissor(&mut pass, &region);
+                pass.draw(0..3, 0..1);
+            }
+            let inv = fl.affine.invert();
+            let view = dst_tex.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("float"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.tile_pipeline);
+            let vp_bg = self.vp_bind(&vp_uniform);
+            pass.set_bind_group(0, &vp_bg, &[]);
+            for (fid, _ftile) in fl.tiles.iter_entries() {
+                let Some(cached) = self.tiles.get(&(u64::MAX, 2, fid)) else {
+                    continue;
+                };
+                let tile_tex = cached.texture.clone();
+                let tile_view = tile_tex.create_view(&Default::default());
+                let accum_view = src_tex.create_view(&Default::default());
+                let white1 = self.placeholder(true);
+                let white2 = self.placeholder(true);
+                let w1v = white1.create_view(&Default::default());
+                let w2v = white2.create_view(&Default::default());
+                let ubuf = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("float-u"),
+                        contents: bytemuck::bytes_of(&TileUniform {
+                            origin: [0.0, 0.0],
+                            opacity: 1.0,
+                            mode: 0, // Normal
+                            has_mask: 0.0,
+                            has_parent: 0.0,
+                            f2l: [
+                                inv.a as f32,
+                                inv.b as f32,
+                                inv.c as f32,
+                                inv.d as f32,
+                                inv.e as f32,
+                                inv.f as f32,
+                            ],
+                            pad: [0.0; 2],
+                            pad2: [0.0; 2],
+                        }),
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    });
+                let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    layout: &self.tile_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&tile_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.nearest),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&accum_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.nearest),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: ubuf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&w1v),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&w2v),
+                        },
+                    ],
+                    label: Some("float"),
+                });
+                // 瓦片 4 角（float 源）→ 正仿射 → 画布 → 屏幕 AABB
+                let (fox, foy) = fid.origin();
+                let cs = [
+                    fl.affine.apply(fox as f64, foy as f64),
+                    fl.affine.apply(fox as f64 + 256.0, foy as f64),
+                    fl.affine.apply(fox as f64, foy as f64 + 256.0),
+                    fl.affine.apply(fox as f64 + 256.0, foy as f64 + 256.0),
+                ];
+                let ss: Vec<_> = cs.iter().map(|p| vp.canvas_to_screen(p.0, p.1)).collect();
+                let x0 = ss.iter().map(|p| p.0).fold(f64::MAX, f64::min).floor() as i32;
+                let y0 = ss.iter().map(|p| p.1).fold(f64::MAX, f64::min).floor() as i32;
+                let x1 = ss.iter().map(|p| p.0).fold(f64::MIN, f64::max).ceil() as i64;
+                let y1 = ss.iter().map(|p| p.1).fold(f64::MIN, f64::max).ceil() as i64;
+                let rect = Rect::new(
+                    x0,
+                    y0,
+                    (x1 - x0 as i64).max(1) as u32,
+                    (y1 - y0 as i64).max(1) as u32,
+                );
+                let Some(sc) = rect.intersect(&region) else {
+                    continue;
+                };
+                pass.set_bind_group(1, &bind, &[]);
+                scissor(&mut pass, &sc);
+                pass.draw(0..3, 0..1);
             }
             self.accum_cur = next;
         }

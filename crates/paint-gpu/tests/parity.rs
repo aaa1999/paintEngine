@@ -337,3 +337,114 @@ fn parity_mask_rotated() {
     }
     assert!(bad <= 64, "mask rotated: {bad}");
 }
+
+#[test]
+fn parity_floating_transform() {
+    // 场景：单层黑线（20..44 @30），提升后复合变换
+    let mut doc = Document::new(usize::MAX);
+    doc.set_background(Color::WHITE);
+    let lid = doc.active_layer();
+    {
+        let layer = doc.layers_mut().get_mut(lid);
+        for y in 26..34 {
+            for x in 20..45 {
+                let tid = paint_core::TileId::at(x as i64, y as i64);
+                let t = layer.tiles.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize;
+                t.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+    // 手工构造浮动：提升该内容
+    let mut float_tiles = paint_core::tile::TileGrid::new();
+    {
+        let layer = doc.layers_mut().get_mut(lid);
+        let ft = float_tiles.get_or_create_mut(paint_core::TileId { x: 0, y: 0 });
+        for y in 26..34 {
+            for x in 20..45 {
+                let i = ((y * 256 + x) * 4) as usize;
+                ft.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+        // 图层清除（模拟提升）
+        let t = layer
+            .tiles
+            .get_or_create_mut(paint_core::TileId { x: 0, y: 0 });
+        for y in 26..34 {
+            for x in 20..45 {
+                let i = ((y * 256 + x) * 4) as usize;
+                t.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 0]);
+            }
+        }
+        layer.tiles.prune();
+    }
+    let mut fl = paint_core::float::Floating {
+        tiles: float_tiles,
+        layer: lid,
+        affine: paint_core::float::Affine2::IDENTITY,
+        pivot: (32.5, 30.0),
+    };
+    fl.translate(30.0, 20.0);
+    fl.rotate(0.6);
+    fl.scale(1.4);
+    doc.set_floating(Some(fl));
+
+    let mut cpu = SoftwareRenderer::new();
+    let mut gpu = WgpuRenderer::new().unwrap();
+    let (w, h) = (200u32, 180u32);
+    let full = Rect::new(0, 0, w, h);
+    let mut cf = vec![0u8; (w * h * 4) as usize];
+    let mut gf = vec![0u8; (w * h * 4) as usize];
+    cpu.composite(&doc, &mut cf, w, full, Some(doc.background()));
+    gpu.composite(&doc, &mut gf, w, full, Some(doc.background()));
+    // 旋转 nearest：允许少量边界差异
+    let mut bad = 0;
+    for (a, b) in cf.as_chunks::<4>().0.iter().zip(gf.as_chunks::<4>().0) {
+        if (0..4)
+            .map(|k| (a[k] as i32 - b[k] as i32).abs())
+            .max()
+            .unwrap()
+            > 2
+        {
+            bad += 1;
+        }
+    }
+    assert!(bad <= 8, "floating parity: {bad}");
+}
+
+#[test]
+fn parity_floating_translate_exact() {
+    // 纯平移（无旋转缩放）应逐像素一致
+    let mut doc = Document::new(usize::MAX);
+    doc.set_background(Color::WHITE);
+    let lid = doc.active_layer();
+    let mut float_tiles = paint_core::tile::TileGrid::new();
+    {
+        let ft = float_tiles.get_or_create_mut(paint_core::TileId { x: 0, y: 0 });
+        for y in 26..34 {
+            for x in 20..45 {
+                let i = ((y * 256 + x) * 4) as usize;
+                ft.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+            }
+        }
+    }
+    let mut fl = paint_core::float::Floating {
+        tiles: float_tiles,
+        layer: lid,
+        affine: paint_core::float::Affine2::IDENTITY,
+        pivot: (32.5, 30.0),
+    };
+    fl.translate(50.0, -10.0);
+    doc.set_floating(Some(fl));
+
+    let mut cpu = SoftwareRenderer::new();
+    let mut gpu = WgpuRenderer::new().unwrap();
+    let (w, h) = (200u32, 180u32);
+    let full = Rect::new(0, 0, w, h);
+    let mut cf = vec![0u8; (w * h * 4) as usize];
+    let mut gf = vec![0u8; (w * h * 4) as usize];
+    cpu.composite(&doc, &mut cf, w, full, Some(doc.background()));
+    gpu.composite(&doc, &mut gf, w, full, Some(doc.background()));
+    assert_close(&cf, &gf, 2, "floating translate");
+}

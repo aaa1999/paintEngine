@@ -40,6 +40,9 @@ pub fn composite(
     if let Some(sel) = doc.selection() {
         paint_selection_outline(doc, sel, target, width, &clip);
     }
+    if let Some(f) = doc.floating() {
+        paint_floating(doc, f, target, width, &clip);
+    }
 
     let vp = doc.viewport();
     let zoom = vp.zoom();
@@ -228,6 +231,129 @@ pub fn composite(
                     }
                 }
             }
+        }
+    }
+}
+
+/// 浮动层（内容级变换预览）：正向仿射映射到画布，最近邻采样、
+/// source-over 叠加于全部图层之上。逐像素 f32 与 GPU 对齐。
+fn paint_floating(
+    doc: &Document,
+    f: &paint_core::float::Floating,
+    target: &mut [u8],
+    width: u32,
+    clip: &Rect,
+) {
+    use paint_core::float::Affine2;
+    let vp = doc.viewport();
+    let inv_vp = Affine2 {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: -vp.pan().0,
+        f: -vp.pan().1,
+    };
+    let _ = inv_vp;
+    // 逆链：screen → canvas（视口逆变换）→ float 源坐标
+    let (rot_c, rot_s) = (vp.rotation().cos(), vp.rotation().sin());
+    let flip = vp.flip_x();
+    let zoom = vp.zoom();
+    let inv_zoom = 1.0 / zoom;
+    let (pan_x, pan_y) = vp.pan();
+    let inv_fl = f.affine.invert();
+
+    // 浮动 bbox → 屏幕 bbox ∩ clip
+    let Some(bbox) = f.canvas_bbox() else { return };
+    let corners_c = [
+        (bbox.x as f64, bbox.y as f64),
+        (bbox.x2() as f64, bbox.y as f64),
+        (bbox.x as f64, bbox.y2() as f64),
+        (bbox.x2() as f64, bbox.y2() as f64),
+    ];
+    let corners_s: Vec<_> = corners_c
+        .iter()
+        .map(|p| vp.canvas_to_screen(p.0, p.1))
+        .collect();
+    let x0s = corners_s
+        .iter()
+        .map(|p| p.0)
+        .fold(f64::MAX, f64::min)
+        .floor() as i32;
+    let y0s = corners_s
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::MAX, f64::min)
+        .floor() as i32;
+    let x1s = corners_s
+        .iter()
+        .map(|p| p.0)
+        .fold(f64::MIN, f64::max)
+        .ceil() as i64;
+    let y1s = corners_s
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::MIN, f64::max)
+        .ceil() as i64;
+    let region = Rect::new(
+        x0s,
+        y0s,
+        (x1s - x0s as i64).max(1) as u32,
+        (y1s - y0s as i64).max(1) as u32,
+    );
+    let Some(reg) = region.intersect(clip) else {
+        return;
+    };
+
+    let inv_a = inv_fl.a as f32;
+    let inv_b = inv_fl.b as f32;
+    let inv_c = inv_fl.c as f32;
+    let inv_d = inv_fl.d as f32;
+    let inv_e = inv_fl.e as f32;
+    let inv_f = inv_fl.f as f32;
+
+    let mut cache_key = u64::MAX;
+    let mut cache: Option<&paint_core::tile::TileData> = None;
+    for y in reg.y..(reg.y + reg.h as i32) {
+        let pyf = (y as f64 + 0.5 - pan_y) as f32;
+        let row = (y as u32 * width) as usize * 4;
+        for x in reg.x..(reg.x + reg.w as i32) {
+            // 屏幕像素中心 → 画布（与旋转路径同式，f32）
+            let pxf = (x as f64 + 0.5 - pan_x) as f32;
+            let rx = rot_c as f32 * pxf + rot_s as f32 * pyf;
+            let ry = -rot_s as f32 * pxf + rot_c as f32 * pyf;
+            let fx0 = if flip { -rx } else { rx };
+            let cx = fx0 * inv_zoom as f32;
+            let cy = ry * inv_zoom as f32;
+            // 画布 → float 源（f32）
+            let sx = inv_a * cx + inv_b * cy + inv_e;
+            let sy = inv_c * cx + inv_d * cy + inv_f;
+            let ix = sx.floor() as i64;
+            let iy = sy.floor() as i64;
+            if ix < -(1 << 30) || iy < -(1 << 30) {
+                continue;
+            }
+            let tid = TileId::at(ix, iy);
+            let key = ((tid.y as u32 as u64) << 32) | tid.x as u32 as u64;
+            if key != cache_key {
+                cache = f.tiles.get(tid).map(|t| &**t);
+                cache_key = key;
+            }
+            let Some(t) = cache else { continue };
+            let lx = (ix & 255) as usize;
+            let ly = (iy & 255) as usize;
+            let i = (ly * 256 + lx) * 4;
+            let p = &t.pixels()[i..i + 4];
+            let sa = p[3] as f32 / 255.0;
+            if sa <= 0.0 {
+                continue;
+            }
+            let d = row + x as usize * 4;
+            let inv = 1.0 - sa;
+            target[d] = (p[0] as f32 + target[d] as f32 * inv + 0.5) as u8;
+            target[d + 1] = (p[1] as f32 + target[d + 1] as f32 * inv + 0.5) as u8;
+            target[d + 2] = (p[2] as f32 + target[d + 2] as f32 * inv + 0.5) as u8;
+            target[d + 3] = 255;
         }
     }
 }

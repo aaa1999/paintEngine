@@ -14,6 +14,8 @@ pub struct Document {
     show_grid: bool,
     /// 像素级选区（R 通道；None = 无选区）。裁剪笔画写入范围。
     selection: Option<crate::tile::TileGrid>,
+    /// 内容级变换中的浮动层（合成时叠加渲染于全部图层之上）。
+    floating: Option<crate::float::Floating>,
 }
 
 impl Document {
@@ -28,6 +30,7 @@ impl Document {
             background: Color::WHITE,
             show_grid: false,
             selection: None,
+            floating: None,
         }
     }
 
@@ -41,7 +44,20 @@ impl Document {
             background: Color::WHITE,
             show_grid: false,
             selection: None,
+            floating: None,
         }
+    }
+
+    pub fn floating(&self) -> Option<&crate::float::Floating> {
+        self.floating.as_ref()
+    }
+
+    pub fn floating_mut(&mut self) -> Option<&mut crate::float::Floating> {
+        self.floating.as_mut()
+    }
+
+    pub fn set_floating(&mut self, f: Option<crate::float::Floating>) {
+        self.floating = f;
     }
 
     pub fn selection(&self) -> Option<&crate::tile::TileGrid> {

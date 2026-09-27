@@ -235,6 +235,38 @@ impl PaintApp {
         });
     }
 
+    /// 内容级变换：Ctrl+T 语义。
+    pub fn begin_transform(&self) -> bool {
+        self.mark_render(|e| e.begin_transform())
+    }
+    pub fn transform_translate(&self, dx: f64, dy: f64) {
+        self.mark_render(|e| {
+            e.transform_translate(dx, dy);
+            true
+        });
+    }
+    pub fn transform_rotate(&self, delta: f64) {
+        self.mark_render(|e| {
+            e.transform_rotate(delta);
+            true
+        });
+    }
+    pub fn transform_scale(&self, f: f64) {
+        self.mark_render(|e| {
+            e.transform_scale(f);
+            true
+        });
+    }
+    pub fn commit_transform(&self) -> bool {
+        self.mark_render(|e| e.commit_transform())
+    }
+    pub fn cancel_transform(&self) -> bool {
+        self.mark_render(|e| e.cancel_transform())
+    }
+    pub fn transforming(&self) -> bool {
+        self.inner.borrow().engine.transforming()
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }
@@ -255,6 +287,16 @@ impl PaintApp {
             e.document_mut().viewport_mut().reset_transform();
             true
         });
+    }
+
+    /// 视口参数（变换拖拽换算用）：[pan_x, pan_y, zoom, rotation, flip]
+    pub fn viewport_params(&self) -> Vec<f64> {
+        let inner = self.inner.borrow();
+        let vp = inner.engine.document().viewport();
+        let (px, py) = vp.pan();
+        let (zoom, rot, flip) = (vp.zoom(), vp.rotation(), vp.flip_x());
+        drop(inner);
+        vec![px, py, zoom, rot, if flip { 1.0 } else { 0.0 }]
     }
 
     pub fn zoom_100(&self) {

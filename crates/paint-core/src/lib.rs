@@ -9,6 +9,7 @@ pub mod blend;
 pub mod color;
 pub mod document;
 pub mod engine;
+pub mod float;
 pub mod geometry;
 pub mod history;
 pub mod input;

@@ -61,6 +61,9 @@ enum Drag {
         start: (f64, f64),
         op: paint_core::SelectionOp,
     },
+    Float {
+        last: (f64, f64),
+    },
 }
 
 struct App {
@@ -304,7 +307,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes().with_title(
-            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · Y 倾斜笔 · R 旋转 · H 翻转 · Alt+点取色 · 1-9 色板 · Ctrl+S 存工程 · Ctrl+Z 撤销",
+            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · Y 倾斜笔 · R 旋转 · H 翻转 · Alt+点取色 · Ctrl+T 变换 · 1-9 色板 · Ctrl+S 存工程",
         );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -372,6 +375,18 @@ impl ApplicationHandler for App {
                         (cy1.ceil() - cy0.floor()) as u32,
                     );
                     self.engine.select_rect(canvas_rect, op);
+                } else if let Drag::Float { last } = self.drag {
+                    // 屏幕位移 → 画布位移（含视口旋转/缩放）
+                    let vp = self.engine.document().viewport().clone();
+                    let (dx, dy) = (self.cursor.0 - last.0, self.cursor.1 - last.1);
+                    let inv_zoom = 1.0 / vp.zoom();
+                    let (c, sn) = (vp.rotation().cos(), vp.rotation().sin());
+                    let rx = c * dx + sn * dy;
+                    let ry = -sn * dx + c * dy;
+                    let fx = if vp.flip_x() { -rx } else { rx };
+                    self.engine
+                        .transform_translate(fx * inv_zoom, ry * inv_zoom);
+                    self.drag = Drag::Float { last: self.cursor };
                 } else if self.drag == Drag::Stroke {
                     let sample = self.pointer_sample();
                     self.engine.handle_event(PlatformEvent::Pointer {
@@ -389,6 +404,10 @@ impl ApplicationHandler for App {
                         && self.dragging_stroke_modifier()
                     {
                         // 留给笔画（Ctrl+Z 等组合不受影响）——Ctrl 纯按住拖拽才选区
+                    }
+                    if self.engine.transforming() {
+                        self.drag = Drag::Float { last: self.cursor };
+                        return;
                     }
                     // Alt+点击 = 吸管取色
                     if self.modifiers.alt_key() && !self.space_down {
@@ -431,6 +450,18 @@ impl ApplicationHandler for App {
                             self.engine.clear_selection();
                         }
                         self.drag = Drag::None;
+                    } else if let Drag::Float { last } = self.drag {
+                        // 屏幕位移 → 画布位移（含视口旋转/缩放）
+                        let vp = self.engine.document().viewport().clone();
+                        let (dx, dy) = (self.cursor.0 - last.0, self.cursor.1 - last.1);
+                        let inv_zoom = 1.0 / vp.zoom();
+                        let (c, sn) = (vp.rotation().cos(), vp.rotation().sin());
+                        let rx = c * dx + sn * dy;
+                        let ry = -sn * dx + c * dy;
+                        let fx = if vp.flip_x() { -rx } else { rx };
+                        self.engine
+                            .transform_translate(fx * inv_zoom, ry * inv_zoom);
+                        self.drag = Drag::Float { last: self.cursor };
                     } else if self.drag == Drag::Stroke {
                         let sample = self.pointer_sample();
                         self.engine.handle_event(PlatformEvent::Pointer {
@@ -491,6 +522,18 @@ impl ApplicationHandler for App {
                     logical_key, state, ..
                 } = &event;
                 match (logical_key, state) {
+                    (Key::Named(NamedKey::Enter), ElementState::Pressed)
+                        if self.engine.transforming() =>
+                    {
+                        self.engine.commit_transform();
+                        println!("变换已提交");
+                    }
+                    (Key::Named(NamedKey::Escape), ElementState::Pressed)
+                        if self.engine.transforming() =>
+                    {
+                        self.engine.cancel_transform();
+                        println!("变换已取消");
+                    }
                     (Key::Named(NamedKey::Space), ElementState::Pressed) => self.space_down = true,
                     (Key::Named(NamedKey::Space), ElementState::Released) => {
                         self.space_down = false
@@ -547,6 +590,18 @@ impl ApplicationHandler for App {
                             "7" => self.set_palette(6),
                             "8" => self.set_palette(7),
                             "9" => self.set_palette(8),
+                            "t" | "T" if ctrl => {
+                                if self.engine.transforming() {
+                                    self.engine.commit_transform();
+                                    println!("变换已提交");
+                                } else if self.engine.begin_transform() {
+                                    println!(
+                                        "内容变换：拖拽移动 · 滚轮旋转 · Shift+滚轮缩放 · Enter 提交 · Esc 取消"
+                                    );
+                                } else {
+                                    println!("没有可变换的内容");
+                                }
+                            }
                             "d" | "D" if ctrl => {
                                 self.engine.clear_selection();
                             }

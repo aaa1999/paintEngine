@@ -331,3 +331,104 @@ fn shapes_undoable_and_clipped() {
     assert!(e.fill_ellipse(32.0, 32.0, 12.0, 8.0));
     assert!(ink_count(&frame(&mut e, &mut s)) > 0);
 }
+
+#[test]
+fn content_transform_move_commit_undo() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 40.0, 32.0); // 墨迹 x 10..40
+    let base = ink_count(&frame(&mut e, &mut s));
+    assert!(base > 0);
+
+    // 整层变换（无选区）：提升 → 平移 → 预览可见（位置变化）
+    assert!(e.begin_transform());
+    assert!(e.transforming());
+    e.transform_translate(20.0, 0.0);
+    let moved = frame(&mut e, &mut s);
+    // 原位置 x 10..40 → 30..60：x 12..18 区间应无墨（被搬走）
+    let old_zone = moved
+        .as_chunks::<4>()
+        .0
+        .chunks(64)
+        .map(|row| row.iter().take(18).skip(12).filter(|p| p[0] < 128).count())
+        .sum::<usize>();
+    assert_eq!(old_zone, 0, "原位被清空");
+    let ink = ink_count(&moved);
+    // 平移后部分边缘出界（帧宽 64）：允许少量损失
+    assert!(ink >= base - 8, "平移预览墨量近似不变: {ink} vs {base}");
+
+    // 提交：入撤销（历史 +1）
+    let hist = e.document().history().undo_len();
+    assert!(e.commit_transform());
+    assert_eq!(e.document().history().undo_len(), hist + 1);
+    let committed = ink_count(&frame(&mut e, &mut s));
+    assert!(
+        committed >= base - 8,
+        "提交后近似等量: {committed} vs {base}"
+    );
+
+    // 撤销 → 完全复原（内容回到原位）
+    assert!(e.undo());
+    let restored = frame(&mut e, &mut s);
+    assert_eq!(ink_count(&restored), base);
+    let back = restored
+        .as_chunks::<4>()
+        .0
+        .chunks(64)
+        .map(|row| row.iter().take(18).skip(12).filter(|p| p[0] < 128).count())
+        .sum::<usize>();
+    assert!(back > 0, "撤销后回到原位");
+}
+
+#[test]
+fn content_transform_cancel_restores() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 40.0, 32.0);
+    let before = frame(&mut e, &mut s);
+    let hist = e.document().history().undo_len();
+
+    assert!(e.begin_transform());
+    e.transform_rotate(1.2);
+    e.transform_scale(1.8);
+    assert!(e.cancel_transform());
+
+    let after = frame(&mut e, &mut s);
+    assert_eq!(ink_count(&after), ink_count(&before));
+    assert_eq!(e.document().history().undo_len(), hist, "取消不入历史");
+    // 像素级对比（恒等放回）
+    let diff = before
+        .iter()
+        .zip(after.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(diff, 0, "取消应逐像素复原");
+}
+
+#[test]
+fn content_transform_selection_only_lifts_selected() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 50.0, 32.0); // 长线 x 10..50
+                                    // 选区只罩住左半
+    e.select_rect(Rect::new(10, 20, 20, 30), paint_core::SelectionOp::Replace);
+    assert!(e.begin_transform());
+    e.transform_translate(30.0, 0.0);
+    let f = frame(&mut e, &mut s);
+    let zone = |x0: usize, x1: usize| -> usize {
+        f.as_chunks::<4>()
+            .0
+            .chunks(64)
+            .map(|row| {
+                row.iter()
+                    .skip(x0)
+                    .take(x1 - x0)
+                    .filter(|p| p[0] < 128)
+                    .count()
+            })
+            .sum()
+    };
+    // 选区部分（x 10..30）被搬走 → 落到 40..60
+    assert_eq!(zone(12, 18), 0, "选区内原位清空");
+    assert!(zone(42, 48) > 0, "选区内容移到 40..60");
+    // 选区外（x 30..50）留在原地
+    assert!(zone(32, 40) > 0, "选区外不动");
+    assert!(e.commit_transform());
+}

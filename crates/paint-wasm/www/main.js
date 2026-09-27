@@ -99,6 +99,55 @@ $("tipFile").onchange = async (e) => {
   e.target.value = "";
 };
 
+// 内容级变换
+let xforming = false;
+function refreshXbar() {
+  xforming = app.transforming();
+  $("xbar").hidden = !xforming;
+  $("xform").classList.toggle("active", xforming);
+}
+$("xform").onclick = () => {
+  if (app.transforming()) app.commit_transform();
+  else app.begin_transform();
+  refreshXbar();
+};
+$("xRotL").onclick = () => app.transform_rotate(-Math.PI / 12);
+$("xRotR").onclick = () => app.transform_rotate(Math.PI / 12);
+$("xScaleUp").onclick = () => app.transform_scale(1.1);
+$("xScaleDn").onclick = () => app.transform_scale(1 / 1.1);
+$("xOk").onclick = () => { app.commit_transform(); refreshXbar(); };
+$("xCancel").onclick = () => { app.cancel_transform(); refreshXbar(); };
+// 变换中：拖拽移动 / 滚轮旋转（Shift+滚轮缩放）
+let xDrag = null;
+const cv = document.getElementById("canvas");
+cv.addEventListener("pointerdown", (e) => {
+  if (!app.transforming()) return;
+  xDrag = [e.clientX, e.clientY];
+  e.preventDefault();
+});
+cv.addEventListener("pointermove", (e) => {
+  if (!xDrag) return;
+  const [px, py, zoom, rot, flip] = app.viewport_params();
+  const dx = (e.clientX - xDrag[0]) * devicePixelRatio;
+  const dy = (e.clientY - xDrag[1]) * devicePixelRatio;
+  xDrag = [e.clientX, e.clientY];
+  // 屏幕位移 → 画布位移（含旋转/翻转）
+  const c = Math.cos(rot), sn = Math.sin(rot);
+  const rx = c * dx + sn * dy;
+  const ry = -sn * dx + c * dy;
+  const fx = flip > 0.5 ? -rx : rx;
+  app.transform_translate(fx / zoom, ry / zoom);
+});
+cv.addEventListener("pointerup", () => { xDrag = null; });
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && app.transforming()) { app.commit_transform(); refreshXbar(); }
+  if (e.key === "Escape" && app.transforming()) { app.cancel_transform(); refreshXbar(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === "t") {
+    e.preventDefault();
+    $("xform").click();
+  }
+});
+
 // 无限画布导航
 $("fit").onclick = () => app.fit_to_content();
 $("grid").onclick = () => {

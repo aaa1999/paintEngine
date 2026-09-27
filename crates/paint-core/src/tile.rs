@@ -72,6 +72,14 @@ pub struct TileGrid {
     tiles: HashMap<TileId, TileRef>,
 }
 
+impl std::fmt::Debug for TileGrid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileGrid")
+            .field("tiles", &self.tiles.len())
+            .finish()
+    }
+}
+
 impl TileGrid {
     pub fn new() -> Self {
         Self::default()
