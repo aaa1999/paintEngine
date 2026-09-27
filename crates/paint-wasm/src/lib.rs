@@ -90,9 +90,18 @@ impl PaintApp {
     pub fn set_tool(&self, tool: &str) {
         let t = match tool {
             "eraser" => Tool::Eraser,
+            "mask" => Tool::Mask,
             _ => Tool::Brush,
         };
         self.inner.borrow_mut().engine.set_tool(t);
+    }
+
+    pub fn tool(&self) -> String {
+        match self.inner.borrow().engine.tool() {
+            Tool::Eraser => "eraser".into(),
+            Tool::Mask => "mask".into(),
+            Tool::Brush => "brush".into(),
+        }
     }
 
     pub fn set_brush_size(&self, size: f32) {
@@ -198,6 +207,14 @@ impl PaintApp {
             e.rotate_view(delta);
             true
         });
+    }
+
+    pub fn toggle_layer_mask(&self) -> bool {
+        self.mark_render(|e| e.toggle_layer_mask())
+    }
+
+    pub fn toggle_layer_clip(&self) -> bool {
+        self.mark_render(|e| e.toggle_layer_clip())
     }
 
     pub fn flip_view(&self) {

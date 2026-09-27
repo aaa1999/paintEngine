@@ -80,13 +80,17 @@ struct TileU {
     origin: vec2<f32>,
     opacity: f32,
     mode: u32,
-    pad: vec4<f32>,
+    has_mask: f32,
+    has_parent: f32,
+    pad: vec2<f32>,
 };
 @group(1) @binding(0) var TILE_TEX: texture_2d<f32>;
 @group(1) @binding(1) var TILE_SAMP: sampler;
 @group(1) @binding(2) var ACCUM_TEX: texture_2d<f32>;
 @group(1) @binding(3) var ACCUM_SAMP: sampler;
 @group(1) @binding(4) var<uniform> TILE_U: TileU;
+@group(1) @binding(5) var MASK_TEX: texture_2d<f32>;
+@group(1) @binding(6) var PARENT_TEX: texture_2d<f32>;
 
 fn hard_light(cb: f32, cs: f32) -> f32 {
     if (cs <= 0.5) {
@@ -150,7 +154,15 @@ fn fs_tile(in: Vout) -> @location(0) vec4<f32> {
         discard;
     }
     let opacity = clamp(TILE_U.opacity, 0.0, 1.0);
-    let as_eff = as_raw * opacity;
+    // 蒙版（R 通道，1:1 最近邻）与剪贴父层（alpha）约束
+    let li = vec2<i32>(floor(local));
+    var as_eff = as_raw * opacity;
+    if (TILE_U.has_mask > 0.5) {
+        as_eff = as_eff * textureLoad(MASK_TEX, li, 0).r;
+    }
+    if (TILE_U.has_parent > 0.5) {
+        as_eff = as_eff * textureLoad(PARENT_TEX, li, 0).a;
+    }
     if (as_eff <= 0.0) {
         discard;
     }

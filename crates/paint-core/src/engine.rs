@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::color::Color;
 use crate::document::Document;
 use crate::geometry::Rect;
 use crate::history::{StrokeRecorder, UndoGroup, UndoOp};
@@ -7,6 +8,7 @@ use crate::input::{PlatformEvent, PointerKind, PointerPhase, PointerSample};
 use crate::layer::{Layer, LayerId};
 use crate::render::{EngineConfig, Renderer, Surface};
 use crate::stroke::{Dab, RoundBrush, StrokeGen, StrokeState};
+use crate::tile::TileGrid;
 use crate::tile::{TileId, TILE};
 
 /// 屏幕脏区状态：All 全量重绘、Part 增量、Clean 无需合成。
@@ -27,11 +29,13 @@ impl Dirty {
     }
 }
 
-/// 当前工具。橡皮 = 同一 RoundBrush 引擎、dst-out 合成。
+/// 当前工具。橡皮 = 同一 RoundBrush 引擎、dst-out 合成；
+/// 蒙版编辑 = 盖章目标切到活动图层的蒙版网格（白=显现）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Brush,
     Eraser,
+    Mask,
 }
 
 struct ActiveStroke {
@@ -212,6 +216,30 @@ impl Engine {
             self.dirty = Dirty::All;
         }
         r
+    }
+
+    /// 给活动图层创建空蒙版（已有则移除）。返回是否启用。
+    pub fn toggle_layer_mask(&mut self) -> bool {
+        let Some(active) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let layer = self.doc.layers_mut().get_mut(active);
+        let had = layer.mask.is_some();
+        layer.mask = if had { None } else { Some(TileGrid::new()) };
+        self.dirty = Dirty::All;
+        !had
+    }
+
+    /// 切换活动图层的剪贴层属性。
+    pub fn toggle_layer_clip(&mut self) -> bool {
+        let Some(active) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let layer = self.doc.layers_mut().get_mut(active);
+        layer.clipped = !layer.clipped;
+        let v = layer.clipped;
+        self.dirty = Dirty::All;
+        v
     }
 
     /// 图层数。
@@ -643,14 +671,28 @@ impl Engine {
         self.stamp(layer, &dabs);
     }
 
-    /// 把 dabs 盖进图层并扩展屏幕脏区。
+    /// 把 dabs 盖进目标网格并扩展屏幕脏区。
+    /// Brush/Eraser → 像素层；Mask → 蒙版网格（白 dab，erase 语义为擦暗蒙版）。
     fn stamp(&mut self, layer: LayerId, dabs: &[Dab]) {
         let Some(act) = self.stroke.as_mut() else {
             return;
         };
-        let l = self.doc.layers_mut().get_mut(layer);
-        self.renderer.stamp_dabs(l, dabs, &mut act.recorder);
-        for dab in dabs {
+        let mut dabs = dabs.to_vec();
+        if self.tool == Tool::Mask {
+            for d in dabs.iter_mut() {
+                d.color = Color::WHITE;
+            }
+        }
+        // 先取可变网格引用再交给渲染器（借用分离经临时层对象不可行，
+        // 直接从 layer 取 &mut TileGrid）
+        let layer_ref = self.doc.layers_mut().get_mut(layer);
+        let grid: &mut crate::tile::TileGrid = if self.tool == Tool::Mask {
+            layer_ref.mask.get_or_insert_with(TileGrid::new)
+        } else {
+            &mut layer_ref.tiles
+        };
+        self.renderer.stamp_dabs(grid, &dabs, &mut act.recorder);
+        for dab in &dabs {
             self.expand_dirty(dab);
         }
     }
@@ -758,7 +800,7 @@ mod tests {
     impl Renderer for MockRenderer {
         fn stamp_dabs(
             &mut self,
-            _layer: &mut crate::layer::Layer,
+            _grid: &mut crate::tile::TileGrid,
             _dabs: &[Dab],
             _recorder: &mut StrokeRecorder,
         ) {

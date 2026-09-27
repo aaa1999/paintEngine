@@ -18,6 +18,11 @@ function selectTool(tool) {
 }
 brushBtn.onclick = () => selectTool("brush");
 eraserBtn.onclick = () => selectTool("eraser");
+$("mask").onclick = () => {
+  const on = app.tool() === "mask";
+  app.set_tool(on ? "brush" : "mask");
+  $("mask").classList.toggle("active", !on);
+};
 window.addEventListener("keydown", (e) => {
   if (e.key === "b" || e.key === "B") selectTool("brush");
   if (e.key === "e" || e.key === "E") selectTool("eraser");

@@ -51,7 +51,9 @@ struct TileUniform {
     origin: [f32; 2],
     opacity: f32,
     mode: u32,
-    pad: [f32; 4],
+    has_mask: f32,
+    has_parent: f32,
+    pad: [f32; 2],
 }
 
 struct CachedTile {
@@ -79,8 +81,11 @@ pub struct WgpuRenderer {
     accum_cur: usize,
     readback: Option<wgpu::Buffer>,
     readback_bpr: u32,
-    // 瓦片缓存：(layer_raw, tile) → 纹理
-    tiles: HashMap<(u64, TileId), CachedTile>,
+    // 瓦片缓存：(layer_raw, 通道, tile) → 纹理（通道 0=像素 1=蒙版）
+    tiles: HashMap<(u64, u8, TileId), CachedTile>,
+    // 蒙版缺省（全显）/ 父层缺省（全隐）占位纹理
+    white_tex: Option<wgpu::Texture>,
+    black_tex: Option<wgpu::Texture>,
 }
 
 impl WgpuRenderer {
@@ -179,6 +184,26 @@ impl WgpuRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -254,7 +279,56 @@ impl WgpuRenderer {
             readback: None,
             readback_bpr: 0,
             tiles: HashMap::new(),
+            white_tex: None,
+            black_tex: None,
         })
+    }
+
+    fn placeholder(&mut self, white: bool) -> wgpu::Texture {
+        let slot = if white {
+            &mut self.white_tex
+        } else {
+            &mut self.black_tex
+        };
+        if slot.is_none() {
+            let v = 255u8 * white as u8;
+            let data = vec![v; (TILE * TILE * 4) as usize];
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(if white { "white" } else { "black" }),
+                size: wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE * 4),
+                    rows_per_image: Some(TILE),
+                },
+                wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            *slot = Some(texture);
+        }
+        slot.as_ref().unwrap().clone()
     }
 
     fn ensure_size(&mut self, w: u32, h: u32) {
@@ -321,11 +395,12 @@ impl WgpuRenderer {
     fn tile_texture(
         &mut self,
         layer: u64,
+        chan: u8,
         id: TileId,
         tile: &Arc<paint_core::tile::TileData>,
     ) -> &wgpu::Texture {
         let ptr = Arc::as_ptr(tile) as usize;
-        let need_upload = match self.tiles.get(&(layer, id)) {
+        let need_upload = match self.tiles.get(&(layer, chan, id)) {
             Some(c) => c.ptr != ptr,
             None => true,
         };
@@ -363,9 +438,10 @@ impl WgpuRenderer {
                     depth_or_array_layers: 1,
                 },
             );
-            self.tiles.insert((layer, id), CachedTile { texture, ptr });
+            self.tiles
+                .insert((layer, chan, id), CachedTile { texture, ptr });
         }
-        &self.tiles.get(&(layer, id)).unwrap().texture
+        &self.tiles.get(&(layer, chan, id)).unwrap().texture
     }
 
     fn copy_bind(&self, tex: &wgpu::Texture) -> wgpu::BindGroup {
@@ -388,8 +464,13 @@ impl WgpuRenderer {
 }
 
 impl Renderer for WgpuRenderer {
-    fn stamp_dabs(&mut self, layer: &mut Layer, dabs: &[Dab], recorder: &mut StrokeRecorder) {
-        cpu_stamp(layer, dabs, recorder);
+    fn stamp_dabs(
+        &mut self,
+        grid: &mut paint_core::tile::TileGrid,
+        dabs: &[Dab],
+        recorder: &mut StrokeRecorder,
+    ) {
+        cpu_stamp(grid, dabs, recorder);
     }
 
     fn merge_layers(&mut self, dst: &mut Layer, src: &Layer, recorder: &mut StrokeRecorder) {
@@ -494,15 +575,39 @@ impl Renderer for WgpuRenderer {
             }
         }
         for (l, id, t) in &uploads {
-            self.tile_texture(*l, *id, t);
+            self.tile_texture(*l, 0, *id, t);
+        }
+        // 蒙版瓦片上传（通道 1）
+        let mut mask_uploads: Vec<(u64, TileId, Arc<paint_core::tile::TileData>)> = Vec::new();
+        for (lid, layer) in doc.layers().iter_with_id() {
+            if !layer.visible || layer.opacity <= 0.0 {
+                continue;
+            }
+            let Some(mask) = &layer.mask else {
+                continue;
+            };
+            for ty in ty0..=ty1 {
+                for tx in tx0..=tx1 {
+                    let id = TileId {
+                        x: tx as i32,
+                        y: ty as i32,
+                    };
+                    if let Some(t) = mask.get(id) {
+                        mask_uploads.push((lid.to_raw(), id, t.clone()));
+                    }
+                }
+            }
+        }
+        for (l, id, t) in &mask_uploads {
+            self.tile_texture(*l, 1, *id, t);
         }
 
         // 与 CPU 同规则：旋转/翻转下走最近邻（双线性邻域跨瓦片有接缝）
         let bilinear = zoom > 1.0 && vp.transform_ident();
         let sampler = if bilinear {
-            &self.linear
+            self.linear.clone()
         } else {
-            &self.nearest
+            self.nearest.clone()
         };
 
         let mut encoder = self
@@ -540,13 +645,26 @@ impl Renderer for WgpuRenderer {
         }
 
         // 2) 逐图层：复制 accum[cur]→accum[1-cur]（脏区内），再盖瓦片
-        for (lid, layer) in doc.layers().iter_with_id() {
+        let layers_vec: Vec<(paint_core::LayerId, &paint_core::layer::Layer)> =
+            doc.layers().iter_with_id().collect();
+        for (li, (lid, layer)) in layers_vec.iter().enumerate() {
             if !layer.visible || layer.opacity <= 0.0 {
                 continue;
             }
+            let parent: Option<(paint_core::LayerId, &paint_core::layer::Layer)> = if layer.clipped
+            {
+                layers_vec[..li]
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|(_, l)| !l.clipped && l.visible)
+            } else {
+                None
+            };
+            let parent_raw = parent.map(|(pid, _)| pid.to_raw());
             let next = 1 - self.accum_cur;
-            let src_tex = self.accum[self.accum_cur].as_ref().unwrap();
-            let dst_tex = self.accum[next].as_ref().unwrap();
+            let src_tex = self.accum[self.accum_cur].as_ref().unwrap().clone();
+            let dst_tex = self.accum[next].as_ref().unwrap().clone();
             {
                 let view = dst_tex.create_view(&Default::default());
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -565,7 +683,7 @@ impl Renderer for WgpuRenderer {
                     occlusion_query_set: None,
                 });
                 pass.set_pipeline(&self.copy_pipeline);
-                pass.set_bind_group(0, &self.copy_bind(src_tex), &[]);
+                pass.set_bind_group(0, &self.copy_bind(&src_tex), &[]);
                 scissor(&mut pass, &region);
                 pass.draw(0..3, 0..1);
             }
@@ -602,10 +720,32 @@ impl Renderer for WgpuRenderer {
                     let Some(_) = layer.tiles.get(id) else {
                         continue;
                     };
-                    let Some(cached) = self.tiles.get(&(lid.to_raw(), id)) else {
+                    let Some(cached) = self.tiles.get(&(lid.to_raw(), 0, id)) else {
                         continue;
                     };
-                    let tile_view = cached.texture.create_view(&Default::default());
+                    let tile_tex = cached.texture.clone();
+                    // 蒙版/父层纹理：缺省占位
+                    let mask_view = match (&layer.mask, self.tiles.get(&(lid.to_raw(), 1, id))) {
+                        (Some(_), Some(mc)) => mc.texture.create_view(&Default::default()),
+                        _ => {
+                            let t = self.placeholder(true);
+                            t.create_view(&Default::default())
+                        }
+                    };
+                    let parent_view = match parent_raw {
+                        Some(praw) => match self.tiles.get(&(praw, 0, id)) {
+                            Some(pc) => pc.texture.create_view(&Default::default()),
+                            None => {
+                                let t = self.placeholder(false);
+                                t.create_view(&Default::default())
+                            }
+                        },
+                        None => {
+                            let t = self.placeholder(true);
+                            t.create_view(&Default::default())
+                        }
+                    };
+                    let tile_view = tile_tex.create_view(&Default::default());
                     let accum_view = src_tex.create_view(&Default::default());
                     let ubuf = self
                         .device
@@ -615,7 +755,9 @@ impl Renderer for WgpuRenderer {
                                 origin: [(tx << 8) as f32, (ty << 8) as f32],
                                 opacity: layer.opacity,
                                 mode: mode_idx,
-                                pad: [0.0; 4],
+                                has_mask: if layer.mask.is_some() { 1.0 } else { 0.0 },
+                                has_parent: if parent.is_some() { 1.0 } else { 0.0 },
+                                pad: [0.0; 2],
                             }),
                             usage: wgpu::BufferUsages::UNIFORM,
                         });
@@ -628,7 +770,7 @@ impl Renderer for WgpuRenderer {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: wgpu::BindingResource::Sampler(sampler),
+                                resource: wgpu::BindingResource::Sampler(&sampler),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 2,
@@ -641,6 +783,14 @@ impl Renderer for WgpuRenderer {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: ubuf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(&mask_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(&parent_view),
                             },
                         ],
                         label: Some("tile"),

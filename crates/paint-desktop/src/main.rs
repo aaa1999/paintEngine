@@ -429,6 +429,22 @@ impl ApplicationHandler for App {
                                     .viewport_mut()
                                     .rotate_by(anchor, delta.to_radians());
                             }
+                            "m" | "M" if shift => {
+                                let on = self.engine.toggle_layer_mask();
+                                println!("图层蒙版: {}", if on { "开" } else { "关" });
+                            }
+                            "m" | "M" => {
+                                let mask_tool = self.engine.tool() == paint_core::Tool::Mask;
+                                self.engine.set_tool(if mask_tool {
+                                    paint_core::Tool::Brush
+                                } else {
+                                    paint_core::Tool::Mask
+                                });
+                            }
+                            "l" | "L" => {
+                                let on = self.engine.toggle_layer_clip();
+                                println!("剪贴层: {}", if on { "开" } else { "关" });
+                            }
                             "h" | "H" => {
                                 let anchor = self.cursor;
                                 self.engine.document_mut().viewport_mut().flip_x_at(anchor);

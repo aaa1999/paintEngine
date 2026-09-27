@@ -52,9 +52,24 @@ pub fn composite(
     let row_base_x = (0.5 - pan_x) * inv_zoom;
     let step_x = if ident { inv_zoom } else { f64::NAN };
 
-    for layer in doc.layers().iter().filter(|l| l.visible && l.opacity > 0.0) {
+    let all_layers: Vec<&paint_core::layer::Layer> = doc.layers().iter().collect();
+    for (li, layer) in all_layers
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.visible && l.opacity > 0.0)
+    {
         let opacity = layer.opacity.clamp(0.0, 1.0);
         let mode = layer.blend_mode;
+        // 剪贴层：约束源 = 下方第一个非剪贴层（Procreate 语义）
+        let parent: Option<&paint_core::layer::Layer> = if layer.clipped {
+            all_layers[..li]
+                .iter()
+                .rev()
+                .copied()
+                .find(|l| !l.clipped && l.visible)
+        } else {
+            None
+        };
         for y in clip.y..(clip.y + clip.h as i32) {
             let py = y as f64 + 0.5 - pan_y;
             let cx_row_ident = row_base_x + clip.x as f64 * step_x;
@@ -124,6 +139,26 @@ pub fn composite(
                 let p = tile.pixels();
                 let d = row + x as usize * 4;
 
+                // 蒙版（1:1 最近邻）：有效 alpha ×= mask.R
+                let mask_mul: f32 = if let Some(mask) = &layer.mask {
+                    mask_nearest(mask, tx, ty, lx, ly)
+                } else {
+                    1.0
+                };
+                if mask_mul <= 0.0 {
+                    continue;
+                }
+                // 剪贴层：× 父层该像素 alpha
+                let parent_mul: f32 = if let Some(pl) = parent {
+                    parent_alpha_at(pl, tx, ty, lx, ly)
+                } else {
+                    1.0
+                };
+                if parent_mul <= 0.0 {
+                    continue;
+                }
+                let extra = mask_mul * parent_mul;
+
                 if bilinear {
                     // 双线性：锚点对齐标准纹理语义（texel i 在 L=i+0.5 满权重），
                     // 与 GPU 采样器一致；邻域钳位在瓦片内（边缘外推，无接缝）
@@ -153,24 +188,25 @@ pub fn composite(
                             + p[i01 + k] as f64 * c
                             + p[i11 + k] as f64 * e
                     };
+                    let op_eff = (opacity as f64 * extra as f64) as f32;
                     if mode == BlendMode::Normal {
                         let inv = 1.0 - sa;
-                        target[d] = over_ch(mix(0) * opacity as f64, target[d] as f64, inv);
-                        target[d + 1] = over_ch(mix(1) * opacity as f64, target[d + 1] as f64, inv);
-                        target[d + 2] = over_ch(mix(2) * opacity as f64, target[d + 2] as f64, inv);
-                        target[d + 3] = over_ch(mix(3) * opacity as f64, target[d + 3] as f64, inv);
+                        target[d] = over_ch(mix(0) * op_eff as f64, target[d] as f64, inv);
+                        target[d + 1] = over_ch(mix(1) * op_eff as f64, target[d + 1] as f64, inv);
+                        target[d + 2] = over_ch(mix(2) * op_eff as f64, target[d + 2] as f64, inv);
+                        target[d + 3] = over_ch(mix(3) * op_eff as f64, target[d + 3] as f64, inv);
                     } else {
                         let q = [
-                            (mix(0) * opacity as f64) as u8,
-                            (mix(1) * opacity as f64) as u8,
-                            (mix(2) * opacity as f64) as u8,
-                            (mix(3) * opacity as f64) as u8,
+                            (mix(0) * op_eff as f64) as u8,
+                            (mix(1) * op_eff as f64) as u8,
+                            (mix(2) * op_eff as f64) as u8,
+                            (mix(3) * op_eff as f64) as u8,
                         ];
-                        composite_pixel(&mut target[d..d + 4], &q, opacity, mode);
+                        composite_pixel(&mut target[d..d + 4], &q, op_eff, mode);
                     }
                 } else {
                     let i = ((ly * TILE as usize) + lx) * 4;
-                    let sa = p[i + 3] as f64 / 255.0 * opacity as f64;
+                    let sa = p[i + 3] as f64 / 255.0 * opacity as f64 * extra as f64;
                     if sa <= 0.0 {
                         continue;
                     }
@@ -191,6 +227,27 @@ pub fn composite(
             }
         }
     }
+}
+
+/// 蒙版瓦片 R 通道（无瓦片处 = 1 全显）。
+fn mask_nearest(mask: &paint_core::tile::TileGrid, tx: i64, ty: i64, lx: usize, ly: usize) -> f32 {
+    mask.get(paint_core::tile::TileId {
+        x: tx as i32,
+        y: ty as i32,
+    })
+    .map(|t| t.pixels()[(ly * TILE as usize + lx) * 4] as f32 / 255.0)
+    .unwrap_or(1.0)
+}
+
+/// 父层该像素 alpha（无内容处 = 0）。
+fn parent_alpha_at(pl: &paint_core::layer::Layer, tx: i64, ty: i64, lx: usize, ly: usize) -> f32 {
+    pl.tiles
+        .get(paint_core::tile::TileId {
+            x: tx as i32,
+            y: ty as i32,
+        })
+        .map(|t| t.pixels()[(ly * TILE as usize + lx) * 4 + 3] as f32 / 255.0)
+        .unwrap_or(0.0)
 }
 
 fn over_ch(src_premul: f64, dst_premul: f64, inv: f64) -> u8 {
@@ -313,7 +370,7 @@ mod tests {
             erase: false,
         }];
         let layer = layers.get_mut(lid);
-        super::super::stamp::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(lid));
+        super::super::stamp::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(lid));
         (doc, 64)
     }
 
@@ -530,7 +587,7 @@ mod tests {
             erase: false,
         }];
         let layer = layers.get_mut(top);
-        super::super::stamp::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(top));
+        super::super::stamp::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(top));
         let mut frame = vec![0u8; (w * w * 4) as usize];
         composite(
             &doc,
@@ -542,5 +599,105 @@ mod tests {
         // 顶层白 dab 半径 3 覆盖中心；半径 3..6 环带仍是黑
         assert_eq!(px(&frame, w, 32, 32), [255, 255, 255, 255]);
         assert_eq!(px(&frame, w, 36, 32)[0], 0, "半径 3..6 环带仍是底黑");
+    }
+}
+
+#[cfg(test)]
+mod mask_clip_tests {
+    use super::*;
+    use paint_core::layer::LayerStack;
+    use paint_core::tile::{TileGrid, TileId};
+
+    fn paint_fill(
+        layers: &mut LayerStack,
+        id: paint_core::LayerId,
+        x0: i32,
+        y0: i32,
+        size: i32,
+        c: [u8; 4],
+    ) {
+        let layer = layers.get_mut(id);
+        for y in y0..y0 + size {
+            for x in x0..x0 + size {
+                let tid = TileId::at(x as i64, y as i64);
+                let t = layer.tiles.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let lx = (x - ox as i32) as usize;
+                let ly = (y - oy as i32) as usize;
+                let i = (ly * 256 + lx) * 4;
+                t.pixels_mut()[i..i + 4].copy_from_slice(&c);
+            }
+        }
+    }
+
+    fn frame(doc: &Document, w: u32) -> Vec<u8> {
+        let mut f = vec![0u8; (w * w * 4) as usize];
+        composite(
+            doc,
+            &mut f,
+            w,
+            Rect::new(0, 0, w, w),
+            Some(doc.background()),
+        );
+        f
+    }
+
+    fn px(f: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        f[((y * w + x) * 4) as usize..][..4].try_into().unwrap()
+    }
+
+    #[test]
+    fn mask_hides_pixels() {
+        let mut doc = Document::new(usize::MAX);
+        doc.set_background(Color::WHITE);
+        let l = doc.active_layer();
+        paint_fill(doc.layers_mut(), l, 10, 10, 30, [0, 0, 0, 255]);
+        let w = 64;
+        // 无蒙版：黑块可见
+        let f = frame(&doc, w);
+        assert_eq!(px(&f, w, 25, 25), [0, 0, 0, 255]);
+
+        // 蒙版：中间 10×10 全显（255），其余黑区置 0
+        {
+            let layer = doc.layers_mut().get_mut(l);
+            let mut mask = TileGrid::new();
+            for y in 20..30 {
+                for x in 20..30 {
+                    let tid = TileId::at(x as i64, y as i64);
+                    let t = mask.get_or_create_mut(tid);
+                    let (ox, oy) = tid.origin();
+                    let i = (((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize;
+                    t.pixels_mut()[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+            layer.mask = Some(mask);
+        }
+        let f = frame(&doc, w);
+        // 蒙版内仍黑
+        assert_eq!(px(&f, w, 25, 25), [0, 0, 0, 255]);
+        // 蒙版外被遮 → 白底
+        assert_eq!(px(&f, w, 12, 12), [255, 255, 255, 255]);
+        // 蒙版无瓦片区域（黑块外的白）不受影响
+        assert_eq!(px(&f, w, 60, 60), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn clipped_layer_limited_by_parent() {
+        let mut doc = Document::new(usize::MAX);
+        doc.set_background(Color::WHITE);
+        let base = doc.active_layer();
+        paint_fill(doc.layers_mut(), base, 10, 10, 20, [0, 0, 0, 255]); // 底层黑 20×20
+        let top = doc.layers_mut().insert(None);
+        paint_fill(doc.layers_mut(), top, 20, 20, 30, [255, 0, 0, 255]); // 顶层红 30×30
+        doc.layers_mut().get_mut(top).clipped = true;
+
+        let w = 64;
+        let f = frame(&doc, w);
+        // (25,25)：在底层黑块内 → 剪贴层红可见 → 红
+        assert_eq!(px(&f, w, 25, 25), [255, 0, 0, 255]);
+        // (45,45)：底层无内容（黑块 10..30）→ 剪贴层被完全约束 → 白底
+        assert_eq!(px(&f, w, 45, 45), [255, 255, 255, 255]);
+        // 边界处半透明父层（硬边无半透明）：黑块边缘外一步即被剪
+        assert_eq!(px(&f, w, 31, 25), [255, 255, 255, 255]);
     }
 }

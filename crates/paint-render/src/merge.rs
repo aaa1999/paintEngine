@@ -9,9 +9,37 @@ pub fn merge_layers(dst: &mut Layer, src: &Layer, recorder: &mut StrokeRecorder)
     if !src.visible {
         return;
     }
-    let ids: Vec<_> = src.tiles.ids().collect();
+    let _ids: Vec<_> = src.tiles.ids().collect();
+    // 蒙版烘焙：合并时把 src 蒙版乘进像素（合并后蒙版不再保留）
+    let mut baked: Option<paint_core::tile::TileGrid> = None;
+    if let Some(mask) = &src.mask {
+        let mut g = src.tiles.clone(); // Arc 共享，写时 COW
+        for tid in g.ids().collect::<Vec<_>>() {
+            let Some(m_tile) = mask.get(tid) else {
+                continue;
+            };
+            let mp = m_tile.pixels();
+            let tile = g.get_or_create_mut(tid);
+            let px = tile.pixels_mut();
+            for (d, m) in px
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(mp.as_chunks::<4>().0)
+            {
+                let v = m[0] as f32 / 255.0;
+                for c in d.iter_mut().take(3) {
+                    *c = (*c as f32 * v + 0.5) as u8;
+                }
+                d[3] = (d[3] as f32 * v + 0.5) as u8;
+            }
+        }
+        baked = Some(g);
+    }
+    let src_grid = baked.as_ref().unwrap_or(&src.tiles);
+    let ids: Vec<_> = src_grid.ids().collect();
     for tid in ids {
-        let Some(s_tile) = src.tiles.get(tid) else {
+        let Some(s_tile) = src_grid.get(tid) else {
             continue;
         };
         recorder.capture(&dst.tiles, tid);
@@ -52,7 +80,7 @@ mod tests {
             erase: false,
         }];
         let l = layers.get_mut(id);
-        super::super::stamp::stamp_dabs(l, &dabs, &mut StrokeRecorder::new(id));
+        super::super::stamp::stamp_dabs(&mut l.tiles, &dabs, &mut StrokeRecorder::new(id));
     }
 
     fn pixel_at(layer: &Layer, x: usize, y: usize) -> [u8; 4] {

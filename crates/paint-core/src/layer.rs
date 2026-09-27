@@ -73,6 +73,10 @@ pub struct Layer {
     pub visible: bool,
     pub blend_mode: BlendMode,
     pub tiles: TileGrid,
+    /// 图层蒙版（灰度存瓦片 R 通道，1:1 对齐像素层；None = 无蒙版）。
+    pub mask: Option<TileGrid>,
+    /// 剪贴层：本层有效 alpha 受下方第一个非剪贴层的像素 alpha 约束。
+    pub clipped: bool,
 }
 
 impl Layer {
@@ -83,6 +87,8 @@ impl Layer {
             visible: true,
             blend_mode: BlendMode::Normal,
             tiles: TileGrid::new(),
+            mask: None,
+            clipped: false,
         }
     }
 }

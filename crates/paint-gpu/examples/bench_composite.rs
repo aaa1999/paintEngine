@@ -41,7 +41,7 @@ fn scene(w: u32, h: u32, layers: usize) -> Document {
         })
         .collect();
     paint_render::stamp_dabs(
-        doc.layers_mut().get_mut(l),
+        &mut doc.layers_mut().get_mut(l).tiles,
         &dabs,
         &mut StrokeRecorder::new(l),
     );
@@ -62,7 +62,7 @@ fn scene(w: u32, h: u32, layers: usize) -> Document {
                 )
             })
             .collect();
-        paint_render::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(id));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(id));
         layer.blend_mode = BlendMode::ALL[k % BlendMode::ALL.len()];
         layer.opacity = 0.8;
     }

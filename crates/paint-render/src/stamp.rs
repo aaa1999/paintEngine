@@ -1,16 +1,16 @@
 use paint_core::history::StrokeRecorder;
-use paint_core::layer::Layer;
 use paint_core::stroke::{Dab, DabMode};
-use paint_core::tile::{TileData, TileId, TILE};
+use paint_core::tile::{TileData, TileGrid, TileId, TILE};
 
-/// 把 dab 序列盖进图层瓦片。写瓦片前经 recorder 记录撤销快照。
-pub fn stamp_dabs(layer: &mut Layer, dabs: &[Dab], recorder: &mut StrokeRecorder) {
+/// 把 dab 序列盖进瓦片网格（像素层或图层蒙版）。
+/// 写瓦片前经 recorder 记录撤销快照。
+pub fn stamp_dabs(grid: &mut TileGrid, dabs: &[Dab], recorder: &mut StrokeRecorder) {
     for dab in dabs {
-        stamp_dab(layer, dab, recorder);
+        stamp_dab(grid, dab, recorder);
     }
 }
 
-fn stamp_dab(layer: &mut Layer, dab: &Dab, recorder: &mut StrokeRecorder) {
+fn stamp_dab(grid: &mut TileGrid, dab: &Dab, recorder: &mut StrokeRecorder) {
     let r = dab.radius.max(0.0) as f64;
     let ri = r.ceil() as i64;
     let x0 = dab.x as i64 - ri;
@@ -25,9 +25,9 @@ fn stamp_dab(layer: &mut Layer, dab: &Dab, recorder: &mut StrokeRecorder) {
                 x: tx as i32,
                 y: ty as i32,
             };
-            recorder.capture(&layer.tiles, id);
+            recorder.capture(grid, id);
             let origin = (tx << 8, ty << 8);
-            let tile = layer.tiles.get_or_create_mut(id);
+            let tile = grid.get_or_create_mut(id);
             stamp_tile(tile, origin, dab, r2, x0, y0, x1, y1);
         }
     }
@@ -184,7 +184,7 @@ mod tests {
         let (mut layers, lid) = layer();
         let mut rec = StrokeRecorder::new(lid);
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[dab_at(100.0, 100.0, 10.0, DabMode::Buildup)],
             &mut rec,
         );
@@ -205,9 +205,13 @@ mod tests {
             alpha: 0.5,
             ..dab_at(50.0, 50.0, 8.0, DabMode::Buildup)
         };
-        stamp_dabs(layers.get_mut(lid), &[half], &mut StrokeRecorder::new(lid));
+        stamp_dabs(
+            &mut layers.get_mut(lid).tiles,
+            &[half],
+            &mut StrokeRecorder::new(lid),
+        );
         let a1 = pixel(&layers, lid, 50, 50)[3];
-        stamp_dabs(layers.get_mut(lid), &[half], &mut rec);
+        stamp_dabs(&mut layers.get_mut(lid).tiles, &[half], &mut rec);
         let a2 = pixel(&layers, lid, 50, 50)[3];
         assert_eq!(a1, 128);
         assert!(a2 > a1, "Buildup 叠加: {a1} → {a2}");
@@ -219,12 +223,12 @@ mod tests {
             ..dab_at(50.0, 50.0, 8.0, DabMode::Wash)
         };
         stamp_dabs(
-            layers2.get_mut(lid2),
+            &mut layers2.get_mut(lid2).tiles,
             &[wash],
             &mut StrokeRecorder::new(lid2),
         );
         stamp_dabs(
-            layers2.get_mut(lid2),
+            &mut layers2.get_mut(lid2).tiles,
             &[wash],
             &mut StrokeRecorder::new(lid2),
         );
@@ -237,7 +241,7 @@ mod tests {
         let (mut layers, lid) = layer();
         let mut rec = StrokeRecorder::new(lid);
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[dab_at(0.0, 0.0, 12.0, DabMode::Buildup)],
             &mut rec,
         );
@@ -264,14 +268,14 @@ mod tests {
         let (mut layers, lid) = layer();
         // 第一笔写入
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[dab_at(10.0, 10.0, 5.0, DabMode::Buildup)],
             &mut StrokeRecorder::new(lid),
         );
         // 第二笔覆盖同一瓦片：快照应为非空旧内容
         let mut rec = StrokeRecorder::new(lid);
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[dab_at(12.0, 12.0, 5.0, DabMode::Buildup)],
             &mut rec,
         );
@@ -288,7 +292,7 @@ mod tests {
         let (mut layers, lid) = layer();
         // 先画不透明黑
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[dab_at(50.0, 50.0, 8.0, DabMode::Buildup)],
             &mut StrokeRecorder::new(lid),
         );
@@ -299,7 +303,7 @@ mod tests {
             ..dab_at(50.0, 50.0, 4.0, DabMode::Buildup)
         };
         stamp_dabs(
-            layers.get_mut(lid),
+            &mut layers.get_mut(lid).tiles,
             &[eraser],
             &mut StrokeRecorder::new(lid),
         );

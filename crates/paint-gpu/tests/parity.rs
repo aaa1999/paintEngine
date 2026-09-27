@@ -34,7 +34,7 @@ fn scene(mid_mode: BlendMode) -> Document {
             dab(60.0, 60.0, 10.0, Color::BLACK, 1.0),
             dab(80.0, 80.0, 14.0, Color::BLACK, 1.0),
         ];
-        paint_render::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(bottom));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(bottom));
     }
     let mid = doc.layers_mut().insert(None);
     {
@@ -63,7 +63,7 @@ fn scene(mid_mode: BlendMode) -> Document {
                 1.0,
             ),
         ];
-        paint_render::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(mid));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(mid));
         layer.opacity = 0.6;
         layer.blend_mode = mid_mode;
     }
@@ -71,7 +71,7 @@ fn scene(mid_mode: BlendMode) -> Document {
     {
         let layer = doc.layers_mut().get_mut(top);
         let dabs = vec![dab(50.0, 90.0, 8.0, Color::WHITE, 1.0)];
-        paint_render::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(top));
+        paint_render::stamp_dabs(&mut layer.tiles, &dabs, &mut StrokeRecorder::new(top));
     }
     doc
 }
@@ -249,4 +249,82 @@ fn rotation_moves_content_cpu_selfcheck() {
         (sx - expect.0).abs() < 1e-9 && (sy - expect.1).abs() < 1e-9,
         "({sx},{sy})"
     );
+}
+
+/// 蒙版 + 剪贴层场景：底层色块 / 中层带蒙版 / 顶层剪贴。
+fn masked_scene() -> Document {
+    let mut doc = Document::new(usize::MAX);
+    doc.set_background(Color::WHITE);
+    let base = doc.active_layer();
+    fill_layer(&mut doc, base, 10, 10, 40, [0, 0, 0, 255]);
+    let mid = doc.layers_mut().insert(None);
+    fill_layer(&mut doc, mid, 20, 20, 40, [30, 144, 255, 255]);
+    doc.layers_mut().get_mut(mid).blend_mode = BlendMode::Multiply;
+    // 蒙版：中间 16×16 全显
+    {
+        let layer = doc.layers_mut().get_mut(mid);
+        let mut mask = paint_core::tile::TileGrid::new();
+        for y in 30..46 {
+            for x in 30..46 {
+                let tid = paint_core::TileId::at(x as i64, y as i64);
+                let t = mask.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize;
+                t.pixels_mut()[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        layer.mask = Some(mask);
+    }
+    let top = doc.layers_mut().insert(None);
+    fill_layer(&mut doc, top, 35, 35, 30, [255, 0, 0, 255]);
+    doc.layers_mut().get_mut(top).clipped = true;
+    doc
+}
+
+fn fill_layer(
+    doc: &mut Document,
+    id: paint_core::LayerId,
+    x0: i32,
+    y0: i32,
+    size: i32,
+    c: [u8; 4],
+) {
+    let layer = doc.layers_mut().get_mut(id);
+    for y in y0..y0 + size {
+        for x in x0..x0 + size {
+            let tid = paint_core::TileId::at(x as i64, y as i64);
+            let t = layer.tiles.get_or_create_mut(tid);
+            let (ox, oy) = tid.origin();
+            let i = (((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize;
+            t.pixels_mut()[i..i + 4].copy_from_slice(&c);
+        }
+    }
+}
+
+#[test]
+fn parity_mask_and_clip() {
+    let doc = masked_scene();
+    let (cpu, gpu) = run_pair(&doc, 128, 128);
+    assert_close(&cpu, &gpu, 2, "mask + clipped");
+}
+
+#[test]
+fn parity_mask_rotated() {
+    let mut doc = masked_scene();
+    doc.viewport_mut().rotate_by((64.0, 64.0), 0.35);
+    doc.viewport_mut().set_zoom(1.3);
+    let (cpu, gpu) = run_pair(&doc, 128, 128);
+    // 旋转 nearest 蒙版边缘允许少量边界差
+    let mut bad = 0;
+    for (a, b) in cpu.as_chunks::<4>().0.iter().zip(gpu.as_chunks::<4>().0) {
+        if (0..4)
+            .map(|k| (a[k] as i32 - b[k] as i32).abs())
+            .max()
+            .unwrap()
+            > 2
+        {
+            bad += 1;
+        }
+    }
+    assert!(bad <= 64, "mask rotated: {bad}");
 }

@@ -4,6 +4,7 @@ use crate::geometry::Rect;
 use crate::history::StrokeRecorder;
 use crate::layer::Layer;
 use crate::stroke::{Dab, RoundBrush};
+use crate::tile::TileGrid;
 
 /// 渲染后端。软件实现见 paint-render；GPU 合成（P2）与 GPU 盖章
 /// （P4）各自提供本 trait 的实现，引擎与后端解耦。
@@ -11,9 +12,9 @@ use crate::stroke::{Dab, RoundBrush};
 /// 注意：trait 定义在 paint-core（消费方）而非 paint-render，
 /// 保证引擎不依赖任何具体渲染实现。
 pub trait Renderer: Send {
-    /// 笔刷盖章热路径。写入瓦片前必须经 `recorder.capture`
-    /// 记录旧快照（撤销依赖）。
-    fn stamp_dabs(&mut self, layer: &mut Layer, dabs: &[Dab], recorder: &mut StrokeRecorder);
+    /// 笔刷盖章热路径（目标为任意瓦片网格：像素层或图层蒙版）。
+    /// 写入瓦片前必须经 `recorder.capture` 记录旧快照（撤销依赖）。
+    fn stamp_dabs(&mut self, grid: &mut TileGrid, dabs: &[Dab], recorder: &mut StrokeRecorder);
 
     /// 合成可见图层到目标缓冲（RGBA8 预乘，行主序，尺寸 `width` ×
     /// `target.len()/width/4`），只处理 `dirty` 区域。

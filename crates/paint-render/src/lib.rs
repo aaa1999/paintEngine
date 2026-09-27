@@ -19,6 +19,7 @@ use paint_core::history::StrokeRecorder;
 use paint_core::layer::Layer;
 use paint_core::render::Renderer;
 use paint_core::stroke::Dab;
+use paint_core::tile::TileGrid;
 
 /// 纯 CPU 渲染器。
 #[derive(Default)]
@@ -31,8 +32,8 @@ impl SoftwareRenderer {
 }
 
 impl Renderer for SoftwareRenderer {
-    fn stamp_dabs(&mut self, layer: &mut Layer, dabs: &[Dab], recorder: &mut StrokeRecorder) {
-        stamp::stamp_dabs(layer, dabs, recorder);
+    fn stamp_dabs(&mut self, grid: &mut TileGrid, dabs: &[Dab], recorder: &mut StrokeRecorder) {
+        stamp::stamp_dabs(grid, dabs, recorder);
     }
 
     fn composite(
