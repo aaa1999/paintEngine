@@ -40,6 +40,7 @@ pub struct LayerInfo {
     pub clipped: bool,
     pub has_mask: bool,
     pub group: Option<String>,
+    pub adjustment: Option<crate::layer::LayerAdjustment>,
 }
 
 /// 对称绘画模式。轴/中心为画布坐标。
@@ -384,6 +385,21 @@ impl Engine {
         self.doc.commit(recorder.finish("PluginFilter"));
         self.dirty = Dirty::All;
         true
+    }
+
+    /// 设置活动图层的非破坏性调整（None 清除）。
+    pub fn set_layer_adjustment(&mut self, adj: Option<crate::layer::LayerAdjustment>) {
+        if let Some(id) = self.doc.layers().try_active() {
+            self.doc.layers_mut().get_mut(id).adjustment = adj;
+            self.dirty = Dirty::All;
+        }
+    }
+
+    pub fn layer_adjustment(&self) -> Option<crate::layer::LayerAdjustment> {
+        self.doc
+            .layers()
+            .try_active()
+            .and_then(|id| self.doc.layers().get(id).adjustment)
     }
 
     /// 对活动图层（或选区内）应用滤镜。入撤销历史。
@@ -1311,6 +1327,7 @@ impl Engine {
                 clipped: l.clipped,
                 has_mask: l.mask.is_some(),
                 group: l.group.clone(),
+                adjustment: l.adjustment,
             })
             .collect()
     }

@@ -202,6 +202,9 @@ pub fn composite(
                 if bilinear {
                     // 双线性：锚点对齐标准纹理语义（texel i 在 L=i+0.5 满权重），
                     // 与 GPU 采样器一致；邻域钳位在瓦片内（边缘外推，无接缝）
+                    // 非破坏性调整：对四个邻域像素逐一应用后插值
+                    let adj = layer.adjustment;
+                    let needs_adj = adj.map(|a| !a.is_identity()).unwrap_or(false);
                     let (ax, bx, xi, xj) = bilerp_idx(fx - 0.5);
                     let (ay, by, yi, yj) = bilerp_idx(fy - 0.5);
                     let t = TILE as usize;
@@ -209,24 +212,36 @@ pub fn composite(
                     let i10 = (yi * t + xj) * 4;
                     let i01 = (yj * t + xi) * 4;
                     let i11 = (yj * t + xj) * 4;
+                    let mut p00 = [p[i00], p[i00 + 1], p[i00 + 2], p[i00 + 3]];
+                    let mut p10 = [p[i10], p[i10 + 1], p[i10 + 2], p[i10 + 3]];
+                    let mut p01 = [p[i01], p[i01 + 1], p[i01 + 2], p[i01 + 3]];
+                    let mut p11 = [p[i11], p[i11 + 1], p[i11 + 2], p[i11 + 3]];
+                    if needs_adj {
+                        if let Some(a) = adj {
+                            a.apply_pixel(&mut p00);
+                            a.apply_pixel(&mut p10);
+                            a.apply_pixel(&mut p01);
+                            a.apply_pixel(&mut p11);
+                        }
+                    }
                     let a = (ax * ay) as f64;
                     let b = (bx * ay) as f64;
                     let c = (ax * by) as f64;
                     let e = (bx * by) as f64;
-                    let sa = (p[i00 + 3] as f64 * a
-                        + p[i10 + 3] as f64 * b
-                        + p[i01 + 3] as f64 * c
-                        + p[i11 + 3] as f64 * e)
+                    let sa = (p00[3] as f64 * a
+                        + p10[3] as f64 * b
+                        + p01[3] as f64 * c
+                        + p11[3] as f64 * e)
                         / 255.0
                         * opacity as f64;
                     if sa <= 0.0 {
                         continue;
                     }
                     let mix = |k: usize| {
-                        p[i00 + k] as f64 * a
-                            + p[i10 + k] as f64 * b
-                            + p[i01 + k] as f64 * c
-                            + p[i11 + k] as f64 * e
+                        p00[k] as f64 * a
+                            + p10[k] as f64 * b
+                            + p01[k] as f64 * c
+                            + p11[k] as f64 * e
                     };
                     let op_eff = (opacity as f64 * extra as f64) as f32;
                     if mode == BlendMode::Normal {
@@ -246,22 +261,30 @@ pub fn composite(
                     }
                 } else {
                     let i = ((ly * TILE as usize) + lx) * 4;
-                    let sa = p[i + 3] as f64 / 255.0 * opacity as f64 * extra as f64;
+                    // 非破坏性调整：采样像素变换（预乘域应用）
+                    let mut adj_px = [p[i], p[i + 1], p[i + 2], p[i + 3]];
+                    if let Some(adj) = &layer.adjustment {
+                        if !adj.is_identity() {
+                            adj.apply_pixel(&mut adj_px);
+                        }
+                    }
+                    let sa = adj_px[3] as f64 / 255.0 * opacity as f64 * extra as f64;
                     if sa <= 0.0 {
                         continue;
                     }
                     if mode == BlendMode::Normal {
                         // 快速路径：预乘 source-over
                         let inv = 1.0 - sa;
-                        target[d] = over_ch(p[i] as f64 * opacity as f64, target[d] as f64, inv);
+                        target[d] =
+                            over_ch(adj_px[0] as f64 * opacity as f64, target[d] as f64, inv);
                         target[d + 1] =
-                            over_ch(p[i + 1] as f64 * opacity as f64, target[d + 1] as f64, inv);
+                            over_ch(adj_px[1] as f64 * opacity as f64, target[d + 1] as f64, inv);
                         target[d + 2] =
-                            over_ch(p[i + 2] as f64 * opacity as f64, target[d + 2] as f64, inv);
+                            over_ch(adj_px[2] as f64 * opacity as f64, target[d + 2] as f64, inv);
                         target[d + 3] =
-                            over_ch(p[i + 3] as f64 * opacity as f64, target[d + 3] as f64, inv);
+                            over_ch(adj_px[3] as f64 * opacity as f64, target[d + 3] as f64, inv);
                     } else {
-                        composite_pixel(&mut target[d..d + 4], &p[i..i + 4], opacity, mode);
+                        composite_pixel(&mut target[d..d + 4], &adj_px, opacity, mode);
                     }
                 }
             }
@@ -1006,5 +1029,89 @@ mod mask_clip_tests {
         assert_eq!(px(&f, w, 45, 45), [255, 255, 255, 255]);
         // 边界处半透明父层（硬边无半透明）：黑块边缘外一步即被剪
         assert_eq!(px(&f, w, 31, 25), [255, 255, 255, 255]);
+    }
+}
+
+#[cfg(test)]
+mod adjustment_tests {
+    use super::*;
+    use paint_core::layer::LayerAdjustment;
+    use paint_core::tile::TileId;
+
+    fn black_layer_doc(adj: Option<LayerAdjustment>) -> Document {
+        let mut doc = Document::new(usize::MAX);
+        doc.set_background(Color::WHITE);
+        let lid = doc.active_layer();
+        {
+            let l = doc.layers_mut().get_mut(lid);
+            for y in 30..34 {
+                for x in 30..34 {
+                    let tid = TileId::at(x as i64, y as i64);
+                    let t = l.tiles.get_or_create_mut(tid);
+                    let (ox, oy) = tid.origin();
+                    let i = (((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize;
+                    t.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+            l.adjustment = adj;
+        }
+        doc
+    }
+
+    fn frame(doc: &Document, w: u32) -> Vec<u8> {
+        let mut f = vec![0u8; (w * w * 4) as usize];
+        composite(
+            doc,
+            &mut f,
+            w,
+            Rect::new(0, 0, w, w),
+            Some(doc.background()),
+        );
+        f
+    }
+
+    #[test]
+    fn brightness_lightens() {
+        let base = black_layer_doc(None);
+        let adj = black_layer_doc(Some(LayerAdjustment {
+            brightness: 50.0,
+            ..Default::default()
+        }));
+        let fb = frame(&base, 64);
+        let fa = frame(&adj, 64);
+        let px = |f: &[u8]| f[(32 * 64 + 32) * 4];
+        assert_eq!(px(&fb), 0, "无调整纯黑");
+        assert!(px(&fa) > 80, "亮度+50 黑变灰: {}", px(&fa));
+    }
+
+    #[test]
+    fn adjustment_non_destructive() {
+        // 调整只影响合成——图层存储像素不变
+        let mut doc = black_layer_doc(None);
+        let lid = doc.active_layer();
+        doc.layers_mut().get_mut(lid).adjustment = Some(LayerAdjustment {
+            brightness: 80.0,
+            ..Default::default()
+        });
+        // 读存储像素
+        let t = doc.layers().get(lid).tiles.get(TileId::at(32, 32)).unwrap();
+        let (ox, oy) = TileId::at(32, 32).origin();
+        let i = (((32 - oy as i32) as usize * 256) + (32 - ox as i32) as usize) * 4;
+        assert_eq!(t.pixels()[i], 0, "存储像素不变（非破坏）");
+        // 合成输出变亮
+        let f = frame(&doc, 64);
+        assert!(f[(32 * 64 + 32) * 4] > 100);
+    }
+
+    #[test]
+    fn strength_zero_is_identity() {
+        let adj = LayerAdjustment {
+            brightness: 100.0,
+            strength: 0.0,
+            ..Default::default()
+        };
+        let doc = black_layer_doc(Some(adj));
+        let f = frame(&doc, 64);
+        assert_eq!(f[(32 * 64 + 32) * 4], 0, "strength=0 时无效果");
     }
 }

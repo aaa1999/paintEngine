@@ -80,8 +80,15 @@ struct TileUniform {
     /// 画布→瓦片局部仿射（6 分量；普通瓦片 = 平移 -origin，
     /// 浮动瓦片 = 视口外再复合浮动逆仿射）
     f2l: [f32; 6],
-    pad: [f32; 2],
-    pad2: [f32; 2],
+    // 非破坏性调整
+    adj_brightness: f32,
+    adj_contrast: f32,
+    adj_saturation: f32,
+    adj_hue: f32,
+    adj_strength: f32,
+    has_adj: f32,
+    pad: f32,
+    _pad_reserved: f32,
 }
 
 struct CachedTile {
@@ -1051,6 +1058,8 @@ impl Renderer for WgpuRenderer {
             if !layer.visible || layer.opacity <= 0.0 {
                 continue;
             }
+            let adj = layer.adjustment.unwrap_or_default();
+            let has_adj = layer.adjustment.map(|a| !a.is_identity()).unwrap_or(false);
             let parent: Option<(paint_core::LayerId, &paint_core::layer::Layer)> = if layer.clipped
             {
                 layers_vec[..li]
@@ -1158,8 +1167,14 @@ impl Renderer for WgpuRenderer {
                                 has_mask: if layer.mask.is_some() { 1.0 } else { 0.0 },
                                 has_parent: if parent.is_some() { 1.0 } else { 0.0 },
                                 f2l: [1.0, 0.0, 0.0, 1.0, -(tx << 8) as f32, -(ty << 8) as f32],
-                                pad: [0.0; 2],
-                                pad2: [0.0; 2],
+                                adj_brightness: adj.brightness,
+                                adj_contrast: adj.contrast,
+                                adj_saturation: adj.saturation,
+                                adj_hue: adj.hue,
+                                adj_strength: adj.strength,
+                                has_adj: if has_adj { 1.0 } else { 0.0 },
+                                pad: 0.0,
+                                _pad_reserved: 0.0,
                             }),
                             usage: wgpu::BufferUsages::UNIFORM,
                         });
@@ -1301,8 +1316,14 @@ impl Renderer for WgpuRenderer {
                                 inv.e as f32,
                                 inv.f as f32,
                             ],
-                            pad: [0.0; 2],
-                            pad2: [0.0; 2],
+                            adj_brightness: 0.0,
+                            adj_contrast: 0.0,
+                            adj_saturation: 0.0,
+                            adj_hue: 0.0,
+                            adj_strength: 1.0,
+                            has_adj: 0.0,
+                            pad: 0.0,
+                            _pad_reserved: 0.0,
                         }),
                         usage: wgpu::BufferUsages::UNIFORM,
                     });

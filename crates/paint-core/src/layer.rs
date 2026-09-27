@@ -14,6 +14,144 @@ impl LayerId {
     }
 }
 
+/// 非破坏性图层调整：合成时对图层像素应用（直行域），不修改
+/// 存储像素——随时可调/可关/可清零。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerAdjustment {
+    /// 亮度偏移 -100..100。
+    pub brightness: f32,
+    /// 对比度 -100..100（中心 0.5）。
+    pub contrast: f32,
+    /// 饱和度 -100..100。
+    pub saturation: f32,
+    /// 色相偏移 -180..180。
+    pub hue: f32,
+    /// 调整强度 0..1（线性插值到原值）。
+    pub strength: f32,
+}
+
+impl Default for LayerAdjustment {
+    fn default() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 0.0,
+            saturation: 0.0,
+            hue: 0.0,
+            strength: 1.0,
+        }
+    }
+}
+
+impl LayerAdjustment {
+    pub fn is_identity(&self) -> bool {
+        self.brightness == 0.0 && self.contrast == 0.0 && self.saturation == 0.0 && self.hue == 0.0
+    }
+
+    /// 直行 RGB（0..1）应用调整，返回新值。
+    pub fn apply_rgb(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let mut r = r;
+        let mut g = g;
+        let mut b = b;
+        let br = self.brightness / 100.0;
+        if br != 0.0 {
+            r += br;
+            g += br;
+            b += br;
+        }
+        let c = 1.0 + self.contrast / 100.0;
+        if c != 1.0 {
+            r = (r - 0.5) * c + 0.5;
+            g = (g - 0.5) * c + 0.5;
+            b = (b - 0.5) * c + 0.5;
+        }
+        if self.hue != 0.0 || self.saturation != 0.0 {
+            let (h, s, l) = rgb_to_hsl(r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
+            let h = (h + self.hue / 360.0).fract();
+            let s = (s * (1.0 + self.saturation / 100.0)).clamp(0.0, 1.0);
+            let (r2, g2, b2) = hsl_to_rgb(h, s, l);
+            r = r2;
+            g = g2;
+            b = b2;
+        }
+        (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0))
+    }
+
+    /// 预乘 RGBA 单像素应用。
+    pub fn apply_pixel(&self, px: &mut [u8]) {
+        if self.is_identity() {
+            return;
+        }
+        let a = px[3] as f32 / 255.0;
+        if a == 0.0 {
+            return;
+        }
+        let r = px[0] as f32 / a / 255.0;
+        let g = px[1] as f32 / a / 255.0;
+        let b = px[2] as f32 / a / 255.0;
+        let (nr, ng, nb) = self.apply_rgb(r, g, b);
+        let t = self.strength.clamp(0.0, 1.0);
+        let r2 = r + (nr - r) * t;
+        let g2 = g + (ng - g) * t;
+        let b2 = b + (nb - b) * t;
+        px[0] = (r2 * a * 255.0 + 0.5) as u8;
+        px[1] = (g2 * a * 255.0 + 0.5) as u8;
+        px[2] = (b2 * a * 255.0 + 0.5) as u8;
+    }
+}
+
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) * 0.5;
+    if max == min {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 {
+        d / (2.0 - max - min)
+    } else {
+        d / (max + min)
+    };
+    let h = (if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    }) / 6.0;
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let conv = |mut t: f32| -> f32 {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (conv(h + 1.0 / 3.0), conv(h), conv(h - 1.0 / 3.0))
+}
+
 /// 图层混合模式。像素公式见 blend.rs（W3C Compositing and Blending Level 1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlendMode {
@@ -79,6 +217,8 @@ pub struct Layer {
     pub clipped: bool,
     /// 图层组标签（同名层属于同组，UI 折叠显示/批量操作）。
     pub group: Option<String>,
+    /// 非破坏性调整（合成时应用，不改像素）。
+    pub adjustment: Option<LayerAdjustment>,
 }
 
 impl Layer {
@@ -92,6 +232,7 @@ impl Layer {
             mask: None,
             clipped: false,
             group: None,
+            adjustment: None,
         }
     }
 }

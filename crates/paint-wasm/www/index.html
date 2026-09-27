@@ -61,6 +61,13 @@
     <button id="fxGray" title="灰度">灰度</button>
     <button id="fxBlur" title="模糊">模糊</button>
     <button id="fxPlugin" title="插件滤镜（通道偏移）">插件</button>
+    <span id="adjBar" hidden>
+      <input type="range" id="adjB" min="-100" max="100" value="0" title="亮度" /><span id="adjBLabel">B0</span>
+      <input type="range" id="adjC" min="-100" max="100" value="0" title="对比度" /><span id="adjCLabel">C0</span>
+      <input type="range" id="adjS" min="-100" max="100" value="0" title="饱和度" /><span id="adjSLabel">S0</span>
+      <button id="adjClear">清除</button>
+    </span>
+    <button id="adjToggle">调整</button>
     <select id="canvasPreset" title="画布尺寸">
       <option value="">无限</option>
       <option value="1920,1080">1080p</option>

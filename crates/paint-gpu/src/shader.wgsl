@@ -88,8 +88,14 @@ struct TileU {
     f2l_d: f32,
     f2l_e: f32,
     f2l_f: f32,
-    pad: vec2<f32>,
-    pad2: vec2<f32>,
+    // 非破坏性调整
+    adj_brightness: f32,
+    adj_contrast: f32,
+    adj_saturation: f32,
+    adj_hue: f32,
+    adj_strength: f32,
+    has_adj: f32,
+    pad: f32,
 };
 @group(1) @binding(0) var TILE_TEX: texture_2d<f32>;
 @group(1) @binding(1) var TILE_SAMP: sampler;
@@ -159,7 +165,39 @@ fn fs_tile(in: Vout) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let src = textureSampleLevel(TILE_TEX, TILE_SAMP, local / 256.0, 0.0);
+    var src = textureSampleLevel(TILE_TEX, TILE_SAMP, local / 256.0, 0.0);
+    // 非破坏性调整（直行域应用，回写预乘）
+    if (TILE_U.has_adj > 0.5 && src.a > 0.0) {
+        let r = src.r / src.a;
+        let g = src.g / src.a;
+        let b = src.b / src.a;
+        var nr = r; var ng = g; var nb = b;
+        // brightness
+        let br = TILE_U.adj_brightness / 100.0;
+        nr = nr + br; ng = ng + br; nb = nb + br;
+        // contrast
+        let cf = 1.0 + TILE_U.adj_contrast / 100.0;
+        nr = (nr - 0.5) * cf + 0.5;
+        ng = (ng - 0.5) * cf + 0.5;
+        nb = (nb - 0.5) * cf + 0.5;
+        // saturation / hue 走简化（饱和度乘子；色相 rotate 未做——CPU 优先精确）
+        let sm = 1.0 + TILE_U.adj_saturation / 100.0;
+        let lum = 0.299 * nr + 0.587 * ng + 0.114 * nb;
+        nr = lum + (nr - lum) * sm;
+        ng = lum + (ng - lum) * sm;
+        nb = lum + (nb - lum) * sm;
+        // strength 插值
+        let t = clamp(TILE_U.adj_strength, 0.0, 1.0);
+        nr = r + (clamp(nr, 0.0, 1.0) - r) * t;
+        ng = g + (clamp(ng, 0.0, 1.0) - g) * t;
+        nb = b + (clamp(nb, 0.0, 1.0) - b) * t;
+        src = vec4<f32>(
+            clamp(nr, 0.0, 1.0) * src.a,
+            clamp(ng, 0.0, 1.0) * src.a,
+            clamp(nb, 0.0, 1.0) * src.a,
+            src.a,
+        );
+    }
     let as_raw = src.a;
     if (as_raw <= 0.0) {
         discard;

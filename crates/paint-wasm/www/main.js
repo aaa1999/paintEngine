@@ -184,6 +184,25 @@ $("fxPlugin").onclick = () => {
   }
 };
 
+// 调整图层（非破坏性）
+$("adjToggle").onclick = () => {
+  $("adjBar").hidden = !$("adjBar").hidden;
+  $("adjToggle").classList.toggle("active", !$("adjBar").hidden);
+};
+function applyAdj() {
+  const b = Number($("adjB").value), c = Number($("adjC").value), s = Number($("adjS").value);
+  $("adjBLabel").textContent = `B${b}`; $("adjCLabel").textContent = `C${c}`; $("adjSLabel").textContent = `S${s}`;
+  app.set_layer_adjustment(b, c, s, 0, 1);
+}
+$("adjB").oninput = applyAdj;
+$("adjC").oninput = applyAdj;
+$("adjS").oninput = applyAdj;
+$("adjClear").onclick = () => {
+  $("adjB").value = 0; $("adjC").value = 0; $("adjS").value = 0;
+  app.clear_layer_adjustment();
+  applyAdj();
+};
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {

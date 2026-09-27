@@ -559,6 +559,33 @@ impl PaintApp {
         r
     }
 
+    /// 调整图层。
+    pub fn set_layer_adjustment(
+        &self,
+        brightness: f32,
+        contrast: f32,
+        saturation: f32,
+        hue: f32,
+        strength: f32,
+    ) {
+        self.mark_render(|e| {
+            e.set_layer_adjustment(Some(paint_core::layer::LayerAdjustment {
+                brightness,
+                contrast,
+                saturation,
+                hue,
+                strength,
+            }));
+            true
+        });
+    }
+    pub fn clear_layer_adjustment(&self) {
+        self.mark_render(|e| {
+            e.set_layer_adjustment(None);
+            true
+        });
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }
