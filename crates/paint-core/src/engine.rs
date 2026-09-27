@@ -7,7 +7,7 @@ use crate::history::{StrokeRecorder, UndoGroup, UndoOp};
 use crate::input::{PlatformEvent, PointerKind, PointerPhase, PointerSample};
 use crate::layer::{Layer, LayerId};
 use crate::render::{EngineConfig, Renderer, Surface};
-use crate::stroke::{Dab, RoundBrush, StrokeGen, StrokeState};
+use crate::stroke::{Dab, DabMode, RoundBrush, StrokeGen, StrokeState};
 use crate::tile::TileGrid;
 use crate::tile::{TileId, TILE};
 
@@ -79,6 +79,9 @@ pub struct Engine {
     transform_recorder: Option<StrokeRecorder>,
     /// 内部剪贴板（瓦片网格自带画布绝对位置）。
     clipboard: Option<TileGrid>,
+    /// 笔刷预设表（内置 + 用户自定义；导入导出走文本格式）。
+    presets: Vec<(String, RoundBrush)>,
+    preset_idx: Option<usize>,
 }
 
 impl Engine {
@@ -103,6 +106,8 @@ impl Engine {
             gesture_latch: false,
             transform_recorder: None,
             clipboard: None,
+            presets: builtin_presets(),
+            preset_idx: None,
         }
     }
 
@@ -1504,13 +1509,258 @@ fn centroid_and_dist(touches: &HashMap<u64, (f64, f64)>) -> Option<((f64, f64), 
     ))
 }
 
+/// 内置预设：参数语义对齐主流绘画软件的手感基准。
+fn builtin_presets() -> Vec<(String, RoundBrush)> {
+    let mk = |name: &str, f: fn(&mut RoundBrush)| -> (String, RoundBrush) {
+        let mut b = RoundBrush::default();
+        f(&mut b);
+        (name.to_string(), b)
+    };
+    vec![
+        mk("硬圆笔", |b| {
+            b.size = 10.0;
+            b.hardness = 1.0;
+            b.spacing = 0.12;
+            b.smoothing = 0.2;
+        }),
+        mk("软圆笔", |b| {
+            b.size = 24.0;
+            b.hardness = 0.15;
+            b.opacity = 0.8;
+            b.flow = 0.9;
+            b.spacing = 0.08;
+            b.smoothing = 0.3;
+        }),
+        mk("马克笔", |b| {
+            b.size = 28.0;
+            b.hardness = 0.85;
+            b.opacity = 0.8;
+            b.spacing = 0.06;
+            b.smoothing = 0.15;
+            b.mode = DabMode::Wash;
+        }),
+        mk("喷枪", |b| {
+            b.size = 40.0;
+            b.hardness = 0.0;
+            b.opacity = 0.5;
+            b.flow = 0.12;
+            b.spacing = 0.35;
+            b.smoothing = 0.4;
+        }),
+        mk("书法笔", |b| {
+            b.size = 18.0;
+            b.hardness = 0.9;
+            b.spacing = 0.1;
+            b.tilt_sensitivity = 1.0;
+        }),
+        mk("细节铅笔", |b| {
+            b.size = 3.0;
+            b.hardness = 0.6;
+            b.opacity = 0.9;
+            b.flow = 0.85;
+            b.spacing = 0.2;
+            b.pressure_gamma = 0.8;
+        }),
+    ]
+}
+
+impl Engine {
+    // ── 笔刷预设 ──
+
+    pub fn preset_names(&self) -> Vec<String> {
+        self.presets.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    pub fn current_preset_name(&self) -> Option<String> {
+        self.preset_idx.map(|i| self.presets[i].0.clone())
+    }
+
+    /// 应用预设（克隆参数到当前笔刷；纹理尖不随预设，记录为限制）。
+    pub fn apply_preset(&mut self, name: &str) -> bool {
+        let Some(i) = self.presets.iter().position(|(n, _)| n == name) else {
+            return false;
+        };
+        let mut b = self.presets[i].1.clone();
+        b.tip = self.brush.tip.clone(); // 尖图独立于预设
+        self.brush = b;
+        self.preset_idx = Some(i);
+        true
+    }
+
+    /// 当前笔刷存为预设：与当前预设同名则覆盖，否则新建。
+    pub fn save_preset(&mut self, name: &str) -> bool {
+        let name = name.replace(['\t', '\n', '\r'], " ").trim().to_string();
+        if name.is_empty() {
+            return false;
+        }
+        let mut b = self.brush.clone();
+        b.tip = None; // 尖图不可序列化
+        if let Some(i) = self.presets.iter().position(|(n, _)| *n == name) {
+            self.presets[i].1 = b;
+            self.preset_idx = Some(i);
+        } else {
+            self.presets.push((name, b));
+            self.preset_idx = Some(self.presets.len() - 1);
+        }
+        true
+    }
+
+    pub fn delete_preset(&mut self, name: &str) -> bool {
+        let Some(i) = self.presets.iter().position(|(n, _)| n == name) else {
+            return false;
+        };
+        self.presets.remove(i);
+        if self.preset_idx == Some(i) {
+            self.preset_idx = None;
+        } else if let Some(idx) = self.preset_idx {
+            if idx > i {
+                self.preset_idx = Some(idx - 1);
+            }
+        }
+        true
+    }
+
+    /// 循环切换预设并应用，返回新预设名。
+    pub fn cycle_preset(&mut self, forward: bool) -> Option<String> {
+        if self.presets.is_empty() {
+            return None;
+        }
+        let n = self.presets.len();
+        let next = match self.preset_idx {
+            None => 0,
+            Some(i) => {
+                if forward {
+                    (i + 1) % n
+                } else {
+                    (i + n - 1) % n
+                }
+            }
+        };
+        self.preset_idx = Some(next);
+        let mut b = self.presets[next].1.clone();
+        b.tip = self.brush.tip.clone();
+        self.brush = b;
+        Some(self.presets[next].0.clone())
+    }
+
+    /// 导出为文本格式（每预设一行，TAB 分隔；跨端可迁移）。
+    pub fn export_presets(&self) -> String {
+        let mut out = String::new();
+        for (name, b) in &self.presets {
+            out.push_str(&format!(
+                "{}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{:.4}	{}	{},{},{}
+",
+                name,
+                b.size,
+                b.hardness,
+                b.opacity,
+                b.flow,
+                b.spacing,
+                b.smoothing,
+                b.stabilizer,
+                b.pressure_gamma,
+                b.tilt_sensitivity,
+                b.scatter,
+                match b.mode {
+                    DabMode::Buildup => "b",
+                    DabMode::Wash => "w",
+                },
+                b.color.r,
+                b.color.g,
+                b.color.b,
+            ));
+        }
+        out
+    }
+
+    /// 按名合并导入（同名覆盖、新名追加），返回成功条数；坏行跳过。
+    pub fn import_presets(&mut self, text: &str) -> usize {
+        let mut n = 0;
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() != 13 {
+                continue;
+            }
+            let mut it = f[1..].iter().map(|v| v.trim().parse::<f32>());
+            let mut next = || it.next().and_then(|r| r.ok());
+            let vals = [
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+                next(),
+            ];
+            let Some(size) = vals[0] else { continue };
+            let Some(hardness) = vals[1] else { continue };
+            let Some(opacity) = vals[2] else { continue };
+            let Some(flow) = vals[3] else { continue };
+            let Some(spacing) = vals[4] else { continue };
+            let Some(smoothing) = vals[5] else { continue };
+            let Some(stabilizer) = vals[6] else { continue };
+            let Some(pressure_gamma) = vals[7] else {
+                continue;
+            };
+            let Some(tilt_sensitivity) = vals[8] else {
+                continue;
+            };
+            let Some(scatter) = vals[9] else { continue };
+            let mode = match f[11] {
+                "w" => DabMode::Wash,
+                _ => DabMode::Buildup,
+            };
+            let c: Vec<&str> = f[12].split(',').collect();
+            if c.len() != 3 {
+                continue;
+            }
+            let (Some(r), Some(g), Some(b)) = (
+                c[0].trim().parse::<u8>().ok(),
+                c[1].trim().parse::<u8>().ok(),
+                c[2].trim().parse::<u8>().ok(),
+            ) else {
+                continue;
+            };
+            let name = f[0].replace(['\t', '\n', '\r'], " ").trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let brush = RoundBrush {
+                size,
+                hardness,
+                opacity,
+                flow,
+                spacing,
+                smoothing,
+                stabilizer,
+                pressure_gamma,
+                tilt_sensitivity,
+                scatter,
+                mode,
+                color: Color { r, g, b },
+                tip: None,
+            };
+            if let Some(i) = self.presets.iter().position(|(n, _)| *n == name) {
+                self.presets[i].1 = brush;
+            } else {
+                self.presets.push((name, brush));
+            }
+            n += 1;
+        }
+        n
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::color::Color;
 
     /// 记录合成/盖章调用次数的空渲染器。
-    struct MockRenderer;
+    pub(super) struct MockRenderer;
 
     impl Renderer for MockRenderer {
         fn stamp_dabs(
@@ -1710,5 +1960,86 @@ mod tests {
         assert!(!e.gesture_latch);
         e.handle_event(pointer(PointerPhase::Up, 20.0, 20.0));
         assert_eq!(e.document().history().undo_len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod preset_tests2 {
+    use super::tests::MockRenderer;
+    use super::*;
+
+    #[test]
+    fn builtins_apply_and_cycle() {
+        let mut e = Engine::new(Box::new(MockRenderer), EngineConfig::default());
+        assert!(e.preset_names().len() >= 6, "内置至少 6 支");
+        assert!(e.apply_preset("喷枪"));
+        assert!((e.brush().flow - 0.12).abs() < 1e-6, "喷枪低流量");
+        assert_eq!(e.current_preset_name().as_deref(), Some("喷枪"));
+
+        let next = e.cycle_preset(true).unwrap();
+        assert_eq!(next, "书法笔", "循环到下一支");
+        assert!((e.brush().tilt_sensitivity - 1.0).abs() < 1e-6);
+        let prev = e.cycle_preset(false).unwrap();
+        assert_eq!(prev, "喷枪");
+        assert!(!e.apply_preset("不存在的笔"));
+    }
+
+    #[test]
+    fn save_overwrite_and_delete() {
+        let mut e = Engine::new(Box::new(MockRenderer), EngineConfig::default());
+        e.brush_mut().size = 77.0;
+        assert!(e.save_preset("我的笔"));
+        assert!(e.apply_preset("硬圆笔"));
+        assert!(e.apply_preset("我的笔"));
+        assert!((e.brush().size - 77.0).abs() < 1e-6, "应用自定义预设");
+
+        // 同名覆盖
+        e.brush_mut().size = 88.0;
+        assert!(e.save_preset("我的笔"));
+        assert!(e.apply_preset("我的笔"));
+        assert!((e.brush().size - 88.0).abs() < 1e-6);
+
+        assert!(e.delete_preset("我的笔"));
+        assert!(!e.apply_preset("我的笔"));
+        // 名字清洗
+        assert!(!e.save_preset("  "));
+        assert!(e.save_preset("a\tb"), "TAB 被替换为空格");
+    }
+
+    #[test]
+    fn export_import_roundtrip() {
+        let mut e = Engine::new(Box::new(MockRenderer), EngineConfig::default());
+        e.brush_mut().size = 33.0;
+        e.brush_mut().stabilizer = 0.7;
+        e.brush_mut().tilt_sensitivity = 0.5;
+        e.brush_mut().color = Color {
+            r: 12,
+            g: 34,
+            b: 56,
+        };
+        assert!(e.save_preset("导出笔"));
+        let text = e.export_presets();
+
+        let mut e2 = Engine::new(Box::new(MockRenderer), EngineConfig::default());
+        let n = e2.import_presets(&text);
+        assert!(n >= 7, "全部导入: {n}");
+        assert!(e2.apply_preset("导出笔"));
+        let b = e2.brush();
+        assert_eq!(b.size, 33.0);
+        assert_eq!(b.stabilizer, 0.7);
+        assert_eq!(b.tilt_sensitivity, 0.5);
+        assert_eq!(
+            b.color,
+            Color {
+                r: 12,
+                g: 34,
+                b: 56
+            }
+        );
+
+        // 坏行跳过
+        let n2 =
+            e2.import_presets("坏行没有制表符\n另一支\t1\t1\t1\t1\t1\t1\t1\t1\t1\t1\tw\t1,2,3\n");
+        assert_eq!(n2, 1);
     }
 }

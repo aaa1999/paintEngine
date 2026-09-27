@@ -99,6 +99,33 @@ $("tipFile").onchange = async (e) => {
   e.target.value = "";
 };
 
+// 笔刷预设
+function refreshPresets() {
+  const sel = $("preset");
+  const cur = app.current_preset_name();
+  sel.innerHTML = "";
+  for (const n of app.preset_names()) {
+    sel.add(new Option(n, n, false, n === cur));
+  }
+}
+$("preset").onchange = () => {
+  app.apply_preset($("preset").value);
+  persistPresets();
+};
+$("savePreset").onclick = () => {
+  const name = prompt("预设名称：", app.current_preset_name() || "我的笔");
+  if (!name) return;
+  if (app.save_preset(name)) { refreshPresets(); persistPresets(); $("status").textContent = `已保存预设 ${name}`; }
+};
+function persistPresets() {
+  try { localStorage.setItem("paintPresets", app.export_presets()); } catch (e) {}
+}
+try {
+  const saved = localStorage.getItem("paintPresets");
+  if (saved) app.import_presets(saved);
+} catch (e) {}
+refreshPresets();
+
 // 剪贴板
 $("copyBtn").onclick = async () => {
   if (!app.copy_selection()) { $("status").textContent = "没有可复制内容"; return; }

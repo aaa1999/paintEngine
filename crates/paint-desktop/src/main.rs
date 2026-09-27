@@ -76,6 +76,7 @@ fn decode_png_straight(png: &[u8], out: &mut Vec<u8>) -> Option<(usize, usize)> 
 fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut app = App::new();
+    app.load_presets_file();
     event_loop.run_app(&mut app).unwrap();
 }
 
@@ -211,6 +212,36 @@ impl App {
         let c = PALETTE[idx];
         self.engine.brush_mut().color = c;
         println!("颜色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
+    }
+
+    fn presets_path() -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        let mut p = std::path::PathBuf::from(home);
+        p.push(".paintengine_presets.txt");
+        Some(p)
+    }
+
+    fn load_presets_file(&mut self) {
+        let Some(path) = Self::presets_path() else {
+            return;
+        };
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let n = self.engine.import_presets(&text);
+            if n > 0 {
+                println!("已载入 {n} 个笔刷预设（{}）", path.display());
+            }
+        }
+    }
+
+    fn save_presets_file(&self) {
+        let Some(path) = Self::presets_path() else {
+            return;
+        };
+        let _ = std::fs::write(&path, self.engine.export_presets());
+    }
+
+    fn after_preset_change(&self) {
+        self.save_presets_file();
     }
 
     /// 复制：内部剪贴板 + 尝试写入系统剪贴板（PNG）。
@@ -668,6 +699,38 @@ impl ApplicationHandler for App {
                             "7" => self.set_palette(6),
                             "8" => self.set_palette(7),
                             "9" => self.set_palette(8),
+                            "," => {
+                                if let Some(n) = self.engine.cycle_preset(false) {
+                                    self.after_preset_change();
+                                    println!("预设 ← {n}");
+                                }
+                            }
+                            "." => {
+                                if let Some(n) = self.engine.cycle_preset(true) {
+                                    self.after_preset_change();
+                                    println!("预设 → {n}");
+                                }
+                            }
+                            "p" | "P" if ctrl => {
+                                if let Some(n) = self.engine.current_preset_name() {
+                                    if self.engine.delete_preset(&n) {
+                                        self.save_presets_file();
+                                        println!("已删除预设 {n}");
+                                    }
+                                } else {
+                                    println!("没有活动预设可删除");
+                                }
+                            }
+                            "p" | "P" => {
+                                let name = self
+                                    .engine
+                                    .current_preset_name()
+                                    .unwrap_or_else(|| "自定义笔".into());
+                                if self.engine.save_preset(&name) {
+                                    self.save_presets_file();
+                                    println!("已保存预设 {name}");
+                                }
+                            }
                             "c" | "C" if ctrl => {
                                 self.copy_to_clipboard();
                             }

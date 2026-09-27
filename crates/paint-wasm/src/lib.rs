@@ -288,6 +288,29 @@ impl PaintApp {
             .unwrap_or_default()
     }
 
+    /// 笔刷预设。
+    pub fn preset_names(&self) -> Vec<String> {
+        self.inner.borrow().engine.preset_names()
+    }
+    pub fn apply_preset(&self, name: String) -> bool {
+        self.mark_render(|e| e.apply_preset(&name))
+    }
+    pub fn save_preset(&self, name: String) -> bool {
+        self.inner.borrow_mut().engine.save_preset(&name)
+    }
+    pub fn delete_preset(&self, name: String) -> bool {
+        self.inner.borrow_mut().engine.delete_preset(&name)
+    }
+    pub fn current_preset_name(&self) -> Option<String> {
+        self.inner.borrow().engine.current_preset_name()
+    }
+    pub fn export_presets(&self) -> String {
+        self.inner.borrow().engine.export_presets()
+    }
+    pub fn import_presets(&self, text: String) -> usize {
+        self.inner.borrow_mut().engine.import_presets(&text)
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }
