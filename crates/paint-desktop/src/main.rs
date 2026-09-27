@@ -351,6 +351,22 @@ impl App {
         }
     }
 
+    fn open_svg(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("SVG 图像", &["svg"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(svg) => match self.engine.import_svg(svg.as_bytes(), 1.0) {
+                Some(_) => println!("已导入 SVG {}", path.display()),
+                None => eprintln!("SVG 解析失败: {}", path.display()),
+            },
+            Err(e) => eprintln!("读取失败: {e}"),
+        }
+    }
+
     fn open_ora(&mut self) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("OpenRaster 工程", &["ora"])
@@ -807,6 +823,9 @@ impl ApplicationHandler for App {
                             }
                             "a" | "A" if ctrl => {
                                 self.engine.select_all();
+                            }
+                            "i" | "I" if ctrl => {
+                                self.open_svg();
                             }
                             "o" | "O" if ctrl => {
                                 self.open_ora();

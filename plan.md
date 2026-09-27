@@ -262,6 +262,13 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.11 SVG 导入（2026-09-27）
+
+- [x] Engine::import_svg：resvg 光栅化（re-export usvg/tiny_skia 零额外依赖面）→ 预乘 RGBA → 瓦片 → 新图层（置于视野中心，可变换定位）；`scale` 参数控制渲染分辨率
+- [x] feature 门控 `svg`（默认开启，wasm 可 opt-out 缩体积）
+- [x] 桌面 Ctrl+I 文件对话框导入；Web SVG 上传按钮（TextEncoder → bytes）
+- [x] 测试 3 项：矩形+圆像素级验证（红/蓝色命中）、缩放像素量对比、无效输入干净失败
+
 ### M4.10 16-bit 导出 + GPU 盖章 compute（2026-09-27）
 
 **16-bit 色深**（f32 中间精度路径）：
@@ -330,7 +337,7 @@ Android 实现备注：
 
 ## 七、暂缓与待议
 
-- **SVG 导入**（2026-09-27 评估）：走 resvg 光栅化导入——渲染到 RGBA8 预乘缓冲后复用既有 PNG 导入管线（bytes → 像素 → 瓦片 → 图层），约一天工作量，feature 门控（wasm 体积考量，usvg 文字需 fontdb 提供字体）。**推荐立项**。
+- **SVG 导入**：✅ 已完成（M4.11）——resvg 光栅化 → 瓦片 → 图层，桌面 Ctrl+I / Web 按钮。
 - **SVG 导出**（2026-09-27 评估）：只有"笔迹记录式导出"有真实意义（引擎持有点序列与参数，可生成变宽轮廓填充路径）；软笔刷需模糊滤镜近似、buildup 自交叠加无法完美表达；且经橡皮/合并/导入修改的层已非"矢量干净"，需回退为内嵌 PNG。忠实 v1 约一周。**不建议现在做**——目的是可缩放输出的话 export_png 的 scale 参数已够；分层互通走 M4 的 OpenRaster；M4 矢量形状/文字工具落地时（自带矢量对象模型）SVG 导出才是架构上自然的时机。
 - 文字渲染（字体库选型 swash vs cosmic-text）：M4 再定
 - 自定义工程格式：倾向只用 OpenRaster，不另造

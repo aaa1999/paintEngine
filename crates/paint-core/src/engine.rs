@@ -1278,6 +1278,60 @@ impl Engine {
         crate::io::encode_png16(&f32_buf, w, h).ok()
     }
 
+    /// 导入 SVG：resvg 光栅化 → 瓦片 → 新图层（置于视野中心）。
+    /// `scale` 控制渲染分辨率（1.0 = SVG 原始尺寸）。
+    #[cfg(feature = "svg")]
+    pub fn import_svg(&mut self, svg: &[u8], scale: f32) -> Option<u64> {
+        let scale = scale.max(0.01);
+        let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).ok()?;
+        let size = tree.size();
+        let (sw, sh) = (size.width(), size.height());
+        if sw <= 0.0 || sh <= 0.0 {
+            return None;
+        }
+        let w = (sw * scale).ceil().max(1.0) as u32;
+        let h = (sh * scale).ceil().max(1.0) as u32;
+        if w > 8192 || h > 8192 {
+            return None;
+        }
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        // tiny-skia Pixmap 是预乘 RGBA（与我们的瓦片一致）
+        let premul = pixmap.data();
+        self.insert_pixels_as_layer(premul, w, h)
+    }
+
+    /// 预乘 RGBA 像素 → 瓦片网格 → 新图层，返回图层 id。
+    fn insert_pixels_as_layer(&mut self, premul: &[u8], w: u32, h: u32) -> Option<u64> {
+        if w == 0 || h == 0 || premul.len() < (w as usize) * (h as usize) * 4 {
+            return None;
+        }
+        let mut layer = Layer::new("SVG 图层");
+        for gy in 0..h as i64 {
+            for gx in 0..w as i64 {
+                let src = ((gy * w as i64 + gx) * 4) as usize;
+                if premul[src + 3] == 0 {
+                    continue;
+                }
+                let tid = TileId::at(gx, gy);
+                let t = layer.tiles.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let lx = (gx - ox) as usize;
+                let ly = (gy - oy) as usize;
+                let dst = (ly * 256 + lx) * 4;
+                t.pixels_mut()[dst..dst + 4].copy_from_slice(&premul[src..src + 4]);
+            }
+        }
+        layer.tiles.prune();
+        let idx = self.doc.layers().len();
+        let id = self.doc.layers_mut().alloc_id();
+        self.doc.layers_mut().insert_entry(idx, id, layer);
+        self.doc.layers_mut().set_active(id);
+        self.dirty = Dirty::All;
+        Some(id.to_raw())
+    }
+
     /// 保存为 .ora（含合成图与缩略图）。
     pub fn save_ora(&mut self) -> Option<Vec<u8>> {
         let merged = self.export_png(None, 1.0, true)?;

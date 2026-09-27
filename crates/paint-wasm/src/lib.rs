@@ -382,6 +382,18 @@ impl PaintApp {
         r
     }
 
+    /// SVG 导入。
+    pub fn import_svg(&self, svg: Vec<u8>, scale: f32) -> f64 {
+        let mut inner = self.inner.borrow_mut();
+        let r = inner
+            .engine
+            .import_svg(&svg, scale)
+            .map(|v| v as f64)
+            .unwrap_or(-1.0);
+        inner.needs_render.set(true);
+        r
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

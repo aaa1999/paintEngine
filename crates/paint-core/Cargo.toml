@@ -9,3 +9,8 @@ png = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
 swash = "0.1"
+resvg = { version = "0.45", optional = true }
+
+[features]
+default = ["svg"]
+svg = ["dep:resvg"]

@@ -214,6 +214,22 @@ const _origRefreshXbar = refreshXbar;
 refreshXbar = () => { _origRefreshXbar(); refreshLayers(); };
 refreshLayers();
 
+// SVG 导入
+$("importSvg").onclick = () => $("svgFile").click();
+$("svgFile").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  const r = app.import_svg(new TextEncoder().encode(text), 1.0);
+  if (r >= 0) {
+    $("status").textContent = `已导入 SVG: ${f.name}`;
+    refreshLayers();
+  } else {
+    $("status").textContent = "SVG 解析失败";
+  }
+  e.target.value = "";
+};
+
 // 剪贴板
 $("copyBtn").onclick = async () => {
   if (!app.copy_selection()) { $("status").textContent = "没有可复制内容"; return; }

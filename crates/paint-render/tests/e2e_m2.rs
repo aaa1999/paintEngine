@@ -558,3 +558,57 @@ fn png16_export_gradient_no_banding() {
         png8.len()
     );
 }
+
+#[test]
+fn svg_import_rect_and_circle() {
+    let (mut e, mut s) = engine();
+    // 简单 SVG：红色矩形 + 蓝色圆
+    let svg = r##"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="100" height="80">
+  <rect x="10" y="10" width="40" height="30" fill="#ff0000"/>
+  <circle cx="70" cy="40" r="20" fill="#0000ff"/>
+</svg>"##;
+    let id = e.import_svg(svg.as_bytes(), 1.0).expect("SVG 解析");
+    assert!(id > 0);
+    assert!(e.document().layers().len() >= 2, "SVG 应为新图层");
+
+    let f = frame(&mut e, &mut s);
+    // 红矩形中心 (30,25)：红色
+    // 直接扫帧找红色和蓝色像素
+    let has_red = f
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|c| c[0] > 200 && c[1] < 80 && c[2] < 80);
+    let has_blue = f
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|c| c[2] > 200 && c[0] < 80 && c[1] < 80);
+    assert!(has_red, "应有红色矩形像素");
+    assert!(has_blue, "应有蓝色圆像素");
+}
+
+#[test]
+fn svg_import_scaled() {
+    let (mut e, mut s) = engine();
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="50">
+  <rect x="0" y="0" width="50" height="50" fill="#00ff00"/>
+</svg>"##;
+    // 原始尺寸
+    let _ = e.import_svg(svg.as_bytes(), 1.0);
+    let f1 = ink_count(&frame(&mut e, &mut s));
+
+    // 2x 缩放应产生更多像素
+    e.undo(); // 清第一个
+    let _ = e.import_svg(svg.as_bytes(), 2.0);
+    let f2 = ink_count(&frame(&mut e, &mut s));
+    assert!(f2 > f1, "2x 缩放应更多像素: {f1} → {f2}");
+}
+
+#[test]
+fn svg_import_invalid_fails_cleanly() {
+    let (mut e, mut s) = engine();
+    assert!(e.import_svg(b"not svg at all", 1.0).is_none());
+    let _ = (&mut e, &mut s);
+}
