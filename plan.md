@@ -262,6 +262,13 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.9 正式图层面板（2026-09-27）
+
+- [x] 引擎 API：set_layer_opacity/visible/blend_mode + layer_infos 复合 getter（含 id/name/opacity/visible/blend/clipped/has_mask）+ select_by_id + reorder/remove/duplicate_by_index 系列
+- [x] Web 侧栏（220px 固定右侧）：层列表自顶向下（绘画软件习惯）+ 每层眼切/名字（含蒙版/剪贴标记）/重排↑↓/点击选层；活动层展开属性行（透明度滑杆 + 混合模式下拉）；底部 ＋/⧉/🗑/⤓/≡ 按钮组
+- [x] 桌面：键盘驱动（PageUp/Dn 循环选层 · V 切可见性 · 面板区滚轮调透明度 · Ctrl+Shift+N 新建 · Ctrl+E 合并 · Ctrl+F 压平）+ 控制台图层面板实时输出（每帧刷新 层名/可见性/透明度/混合模式/活动标记）
+- 已知限制（记录）：桌面绘制面板（swash 文字 + 帧缓冲叠加）未做——帧缓冲由引擎持有，叠加需 Resize 传减面板宽或引入呈现拦截层，后续升级；当前控制台 + 键盘方案功能完整
+
 ### M4.8 笔刷预设（2026-09-27）
 
 - [x] 引擎级预设表：内置 6 支调好的笔（硬圆/软圆/马克(Wash)/喷枪/书法(tilt)/细节铅笔）+ 用户自定义；apply/save（同名覆盖）/delete/cycle API

@@ -311,6 +311,77 @@ impl PaintApp {
         self.inner.borrow_mut().engine.import_presets(&text)
     }
 
+    /// 图层面板。
+    pub fn layer_infos(&self) -> Vec<js_sys::Object> {
+        let inner = self.inner.borrow();
+        inner
+            .engine
+            .layer_infos()
+            .into_iter()
+            .map(|li| {
+                let o = js_sys::Object::new();
+                js_sys::Reflect::set(&o, &"id".into(), &JsValue::from(li.id)).unwrap();
+                js_sys::Reflect::set(&o, &"name".into(), &JsValue::from(li.name.as_str())).unwrap();
+                js_sys::Reflect::set(&o, &"opacity".into(), &JsValue::from(li.opacity)).unwrap();
+                js_sys::Reflect::set(&o, &"visible".into(), &JsValue::from(li.visible)).unwrap();
+                js_sys::Reflect::set(
+                    &o,
+                    &"blendMode".into(),
+                    &JsValue::from(li.blend_mode.name()),
+                )
+                .unwrap();
+                js_sys::Reflect::set(&o, &"clipped".into(), &JsValue::from(li.clipped)).unwrap();
+                js_sys::Reflect::set(&o, &"hasMask".into(), &JsValue::from(li.has_mask)).unwrap();
+                o
+            })
+            .collect()
+    }
+    pub fn active_layer_id(&self) -> f64 {
+        self.inner
+            .borrow()
+            .engine
+            .active_layer_id()
+            .map(|v| v as f64)
+            .unwrap_or(-1.0)
+    }
+    pub fn select_layer_by_id(&self, raw: f64) -> bool {
+        self.mark_render(|e| e.select_layer_by_id(raw as u64))
+    }
+    pub fn set_layer_opacity_by_index(&self, index: usize, v: f32) {
+        self.mark_render(|e| {
+            e.set_layer_opacity_by_index(index, v);
+            true
+        });
+    }
+    pub fn set_layer_visible_by_index(&self, index: usize, v: bool) {
+        self.mark_render(|e| {
+            e.set_layer_visible_by_index(index, v);
+            true
+        });
+    }
+    pub fn set_layer_blend_by_index(&self, index: usize, mode_idx: usize) {
+        self.mark_render(|e| {
+            e.set_layer_blend_by_index(index, mode_idx);
+            true
+        });
+    }
+    pub fn reorder_layer_by_index(&self, index: usize, to: usize) -> bool {
+        self.mark_render(|e| e.reorder_layer_by_index(index, to))
+    }
+    pub fn remove_layer_by_index(&self, index: usize) -> bool {
+        self.mark_render(|e| e.remove_layer_by_index(index))
+    }
+    pub fn duplicate_layer_by_index(&self, index: usize) -> f64 {
+        let mut inner = self.inner.borrow_mut();
+        let r = inner
+            .engine
+            .duplicate_layer_by_index(index)
+            .map(|v| v as f64)
+            .unwrap_or(-1.0);
+        inner.needs_render.set(true);
+        r
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

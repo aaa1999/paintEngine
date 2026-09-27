@@ -126,6 +126,94 @@ try {
 } catch (e) {}
 refreshPresets();
 
+// 图层面板
+const BLEND_NAMES = app.blend_mode_names();
+function refreshLayers() {
+  const infos = app.layer_infos();
+  const active = app.active_layer_id();
+  const list = $("layerList");
+  list.innerHTML = "";
+  $("layerCount").textContent = `(${infos.length})`;
+  // 自顶向下（数组底→顶，反转显示）
+  for (let i = infos.length - 1; i >= 0; i--) {
+    const li = infos[i];
+    const row = document.createElement("div");
+    row.className = "layerRow" + (li.id === active ? " active" : "");
+    row.dataset.index = i;
+    // 眼
+    const eye = document.createElement("span");
+    eye.className = "eye";
+    eye.textContent = li.visible ? "👁" : "🚫";
+    eye.onclick = (e) => { e.stopPropagation(); app.set_layer_visible_by_index(i, !li.visible); refreshLayers(); };
+    row.appendChild(eye);
+    // 名
+    const name = document.createElement("span");
+    name.className = "lName";
+    name.textContent = li.name + (li.clipped ? " ⧉" : "") + (li.hasMask ? " ◐" : "");
+    row.appendChild(name);
+    // 重排/删除
+    const ops = document.createElement("span");
+    ops.className = "lOps";
+    if (i < infos.length - 1) {
+      const up = document.createElement("button");
+      up.textContent = "↑"; up.title = "上移";
+      up.onclick = (e) => { e.stopPropagation(); app.reorder_layer_by_index(i, i + 1); refreshLayers(); };
+      ops.appendChild(up);
+    }
+    if (i > 0) {
+      const dn = document.createElement("button");
+      dn.textContent = "↓"; dn.title = "下移";
+      dn.onclick = (e) => { e.stopPropagation(); app.reorder_layer_by_index(i, i - 1); refreshLayers(); };
+      ops.appendChild(dn);
+    }
+    row.appendChild(ops);
+    // 选层
+    row.onclick = () => { app.select_layer_by_id(li.id); refreshLayers(); };
+    list.appendChild(row);
+    // 活动层的属性行（透明度/混合模式）
+    if (li.id === active) {
+      const det = document.createElement("div");
+      det.className = "layerDetail";
+      det.style.marginLeft = "10px";
+      // 透明度
+      const opLabel = document.createElement("span");
+      opLabel.textContent = "透";
+      det.appendChild(opLabel);
+      const opRange = document.createElement("input");
+      opRange.type = "range"; opRange.min = 0; opRange.max = 100;
+      opRange.value = Math.round(li.opacity * 100);
+      opRange.oninput = () => app.set_layer_opacity_by_index(i, opRange.value / 100);
+      det.appendChild(opRange);
+      const opVal = document.createElement("span");
+      opVal.textContent = `${Math.round(li.opacity * 100)}%`;
+      opRange.oninput = () => { app.set_layer_opacity_by_index(i, opRange.value / 100); opVal.textContent = `${opRange.value}%`; };
+      det.appendChild(opVal);
+      // 混合模式
+      const blendSel = document.createElement("select");
+      for (const [bi, bn] of BLEND_NAMES.entries()) blendSel.add(new Option(bn, bi));
+      blendSel.value = BLEND_NAMES.indexOf(li.blendMode) >= 0 ? BLEND_NAMES.indexOf(li.blendMode) : 0;
+      blendSel.onchange = () => app.set_layer_blend_by_index(i, Number(blendSel.value));
+      det.appendChild(blendSel);
+      list.appendChild(det);
+    }
+  }
+}
+$("lyAdd").onclick = () => { app.add_layer(); refreshLayers(); };
+$("lyDup").onclick = () => {
+  const idx = app.layer_infos().findIndex((l) => l.id === app.active_layer_id());
+  if (idx >= 0) { app.duplicate_layer_by_index(idx); refreshLayers(); }
+};
+$("lyDel").onclick = () => {
+  const idx = app.layer_infos().findIndex((l) => l.id === app.active_layer_id());
+  if (idx >= 0 && app.layer_infos().length > 1) { app.remove_layer_by_index(idx); refreshLayers(); }
+};
+$("lyMerge").onclick = () => { app.merge_down(); refreshLayers(); };
+$("lyFlat").onclick = () => { app.flatten(); refreshLayers(); };
+// 面板操作后刷新（笔刷操作改变层数时也刷新）
+const _origRefreshXbar = refreshXbar;
+refreshXbar = () => { _origRefreshXbar(); refreshLayers(); };
+refreshLayers();
+
 // 剪贴板
 $("copyBtn").onclick = async () => {
   if (!app.copy_selection()) { $("status").textContent = "没有可复制内容"; return; }

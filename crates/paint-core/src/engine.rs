@@ -5,7 +5,7 @@ use crate::document::Document;
 use crate::geometry::Rect;
 use crate::history::{StrokeRecorder, UndoGroup, UndoOp};
 use crate::input::{PlatformEvent, PointerKind, PointerPhase, PointerSample};
-use crate::layer::{Layer, LayerId};
+use crate::layer::{BlendMode, Layer, LayerId};
 use crate::render::{EngineConfig, Renderer, Surface};
 use crate::stroke::{Dab, DabMode, RoundBrush, StrokeGen, StrokeState};
 use crate::tile::TileGrid;
@@ -27,6 +27,18 @@ impl Dirty {
             Dirty::Part(p) => *self = Dirty::Part(p.union(&r)),
         }
     }
+}
+
+/// 图层面板 UI 的单层信息。
+#[derive(Debug, Clone)]
+pub struct LayerInfo {
+    pub id: u64,
+    pub name: String,
+    pub opacity: f32,
+    pub visible: bool,
+    pub blend_mode: BlendMode,
+    pub clipped: bool,
+    pub has_mask: bool,
 }
 
 /// 选区布尔操作。
@@ -948,6 +960,139 @@ impl Engine {
         let v = layer.clipped;
         self.dirty = Dirty::All;
         v
+    }
+
+    /// 设置图层属性（面板 UI 用；统一标脏）。
+    pub fn set_layer_opacity(&mut self, id: LayerId, v: f32) {
+        if let Some(l) = self.doc.layers_mut().try_get_mut(id) {
+            l.opacity = v.clamp(0.0, 1.0);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    pub fn set_layer_visible(&mut self, id: LayerId, v: bool) {
+        if let Some(l) = self.doc.layers_mut().try_get_mut(id) {
+            l.visible = v;
+            self.dirty = Dirty::All;
+        }
+    }
+
+    pub fn set_layer_blend_mode(&mut self, id: LayerId, mode: BlendMode) {
+        if let Some(l) = self.doc.layers_mut().try_get_mut(id) {
+            l.blend_mode = mode;
+            self.dirty = Dirty::All;
+        }
+    }
+
+    /// 图层信息（面板 UI 渲染用）。
+    pub fn layer_infos(&self) -> Vec<LayerInfo> {
+        self.doc
+            .layers()
+            .iter_with_id()
+            .map(|(id, l)| LayerInfo {
+                id: id.to_raw(),
+                name: l.name.clone(),
+                opacity: l.opacity,
+                visible: l.visible,
+                blend_mode: l.blend_mode,
+                clipped: l.clipped,
+                has_mask: l.mask.is_some(),
+            })
+            .collect()
+    }
+
+    pub fn active_layer_id(&self) -> Option<u64> {
+        self.doc.layers().try_active().map(|l| l.to_raw())
+    }
+
+    pub fn select_layer_by_id(&mut self, raw: u64) -> bool {
+        let id = LayerId::from_raw(raw);
+        if !self.doc.layers().contains(id) {
+            return false;
+        }
+        self.doc.layers_mut().set_active(id);
+        self.dirty = Dirty::All;
+        true
+    }
+
+    pub fn blend_mode_names() -> Vec<&'static str> {
+        BlendMode::ALL.iter().map(|m| m.name()).collect()
+    }
+
+    /// 按原始 id 操作（面板用薄封装）。
+    pub fn reorder_layer_by_index(&mut self, index: usize, to: usize) -> bool {
+        let Some(id) = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(i, _)| i.to_raw())
+        else {
+            return false;
+        };
+        self.reorder_layer(LayerId::from_raw(id), to)
+    }
+
+    pub fn remove_layer_by_index(&mut self, index: usize) -> bool {
+        let Some(id) = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(i, _)| i.to_raw())
+        else {
+            return false;
+        };
+        self.remove_layer(LayerId::from_raw(id))
+    }
+
+    pub fn duplicate_layer_by_index(&mut self, index: usize) -> Option<u64> {
+        let id_opt = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(id, _)| id);
+        let id = id_opt?;
+        self.duplicate_layer(id).map(|l| l.to_raw())
+    }
+
+    pub fn set_layer_opacity_by_index(&mut self, index: usize, v: f32) {
+        let id_opt = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(id, _)| id);
+        if let Some(id) = id_opt {
+            self.set_layer_opacity(id, v);
+        }
+    }
+
+    pub fn set_layer_visible_by_index(&mut self, index: usize, v: bool) {
+        let id_opt = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(id, _)| id);
+        if let Some(id) = id_opt {
+            self.set_layer_visible(id, v);
+        }
+    }
+
+    pub fn set_layer_blend_by_index(&mut self, index: usize, mode_idx: usize) {
+        let id_opt = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(index)
+            .map(|(id, _)| id);
+        if let Some(id) = id_opt {
+            if let Some(m) = BlendMode::ALL.get(mode_idx) {
+                self.set_layer_blend_mode(id, *m);
+            }
+        }
     }
 
     /// 图层数。

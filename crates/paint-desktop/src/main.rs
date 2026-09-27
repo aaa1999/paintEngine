@@ -283,6 +283,29 @@ impl App {
         }
     }
 
+    fn panel_x0(&self) -> i32 {
+        self.window
+            .as_ref()
+            .map_or(i32::MAX, |w| w.inner_size().width as i32)
+    }
+
+    fn cycle_active_layer(&mut self, dir: i32) {
+        let infos = self.engine.layer_infos();
+        let active = self.engine.active_layer_id().unwrap_or(u64::MAX);
+        let n = infos.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = infos
+            .iter()
+            .position(|l| l.id == active)
+            .map(|i| i as i32)
+            .unwrap_or(0);
+        let next = (cur + dir + n) % n;
+        self.engine.select_layer_by_id(infos[next as usize].id);
+        println!("活动层: {} ({}/{})", infos[next as usize].name, next + 1, n);
+    }
+
     fn dragging_stroke_modifier(&self) -> bool {
         false
     }
@@ -607,14 +630,32 @@ impl ApplicationHandler for App {
                 _ => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
-                let factor = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => 1.15f64.powf(y as f64),
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 400.0).exp(),
+                let step = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y as f64,
+                    MouseScrollDelta::PixelDelta(p) => p.y / 53.0,
                 };
-                self.engine
-                    .document_mut()
-                    .viewport_mut()
-                    .zoom_at(self.cursor, factor);
+                if self.engine.transforming() {
+                    if self.modifiers.shift_key() {
+                        self.engine.transform_scale(1.1f64.powf(step));
+                    } else {
+                        self.engine.transform_rotate(5.0f64.to_radians() * step);
+                    }
+                } else if self.cursor.0 as i32 >= self.panel_x0() {
+                    // 面板区域滚轮 = 活动层透明度
+                    let infos = self.engine.layer_infos();
+                    let active = self.engine.active_layer_id().unwrap_or(u64::MAX);
+                    if let Some(i) = infos.iter().position(|l| l.id == active) {
+                        let v = (infos[i].opacity + 0.05 * step as f32).clamp(0.0, 1.0);
+                        self.engine.set_layer_opacity_by_index(i, v);
+                        println!("{} 透明度: {:.0}%", infos[i].name, v * 100.0);
+                    }
+                } else {
+                    let factor = 1.15f64.powf(step);
+                    self.engine
+                        .document_mut()
+                        .viewport_mut()
+                        .zoom_at(self.cursor, factor);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let KeyEvent {
@@ -630,6 +671,12 @@ impl ApplicationHandler for App {
                         if self.engine.has_selection() && !self.engine.transforming() =>
                     {
                         self.engine.delete_selection();
+                    }
+                    (Key::Named(NamedKey::PageUp), ElementState::Pressed) => {
+                        self.cycle_active_layer(1);
+                    }
+                    (Key::Named(NamedKey::PageDown), ElementState::Pressed) => {
+                        self.cycle_active_layer(-1);
                     }
                     (Key::Named(NamedKey::Enter), ElementState::Pressed)
                         if self.engine.transforming() =>
@@ -817,6 +864,18 @@ impl ApplicationHandler for App {
                                 };
                                 self.engine.brush_mut().stabilizer = next;
                                 println!("稳定器: {next:.0}");
+                            }
+                            "v" | "V" => {
+                                let infos = self.engine.layer_infos();
+                                let active = self.engine.active_layer_id().unwrap_or(u64::MAX);
+                                if let Some(i) = infos.iter().position(|l| l.id == active) {
+                                    self.engine.set_layer_visible_by_index(i, !infos[i].visible);
+                                    println!(
+                                        "{} 可见性: {}",
+                                        infos[i].name,
+                                        if infos[i].visible { "隐藏" } else { "显示" }
+                                    );
+                                }
                             }
                             "g" | "G" => {
                                 let on = !self.engine.show_grid();
