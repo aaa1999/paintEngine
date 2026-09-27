@@ -39,6 +39,11 @@ $("size").oninput = (e) => {
   app.set_brush_size(Number(e.target.value));
   $("sizeLabel").textContent = `${e.target.value}px`;
 };
+$("stab").oninput = (e) => {
+  const v = Number(e.target.value);
+  app.set_stabilizer(v / 100);
+  $("stabLabel").textContent = `稳定${v}%`;
+};
 
 // 混合模式
 const blendSel = $("blend");

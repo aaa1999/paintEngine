@@ -103,6 +103,10 @@ impl PaintApp {
         self.inner.borrow_mut().engine.brush_mut().color = Color { r, g, b };
     }
 
+    pub fn set_stabilizer(&self, v: f32) {
+        self.inner.borrow_mut().engine.brush_mut().stabilizer = v.clamp(0.0, 0.98);
+    }
+
     pub fn set_brush_opacity(&self, v: f32) {
         let mut inner = self.inner.borrow_mut();
         let v = v.clamp(0.01, 1.0);

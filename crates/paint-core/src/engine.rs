@@ -632,9 +632,17 @@ impl Engine {
     }
 
     fn end_stroke(&mut self) {
-        let Some(act) = self.stroke.take() else {
+        let Some(mut act) = self.stroke.take() else {
             return;
         };
+        // 稳定器收笔追赶：补齐滞后段的 dabs（在 recorder 存活期内）
+        let catch_up = self.brush.end(&mut act.state);
+        if !catch_up.is_empty() {
+            let layer = act.layer;
+            self.stroke = Some(act);
+            self.stamp(layer, &catch_up);
+            act = self.stroke.take().unwrap();
+        }
         let group = act.recorder.finish("Stroke");
         // 回收本笔触及且变回全透明的瓦片（橡皮/混合工具的常态）
         if let Some(l) = self.doc.layers_mut().try_get_mut(act.layer) {

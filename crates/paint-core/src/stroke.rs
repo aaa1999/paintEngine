@@ -32,6 +32,8 @@ pub struct Dab {
 pub struct StrokeState {
     /// EMA 平滑后的当前位置。
     smooth: (f64, f64),
+    /// 最近一次原始样本位置（稳定器收笔追赶的目标）。
+    raw: (f64, f64),
     /// 上一个已发射 dab 的位置。
     since_dab: (f64, f64),
     last_radius: f32,
@@ -41,9 +43,15 @@ impl StrokeState {
     pub fn new(x: f64, y: f64, radius: f32) -> Self {
         Self {
             smooth: (x, y),
+            raw: (x, y),
             since_dab: (x, y),
             last_radius: radius,
         }
+    }
+
+    /// 平滑后的当前位置（调试/测试用）。
+    pub fn position(&self) -> (f64, f64) {
+        self.smooth
     }
 }
 
@@ -55,6 +63,10 @@ pub trait StrokeGen {
     fn end(&self, _state: &mut StrokeState) -> Vec<Dab> {
         Vec::new()
     }
+}
+
+fn lerp(a: f64, b: f64, f: f64) -> f64 {
+    a + (b - a) * f
 }
 
 /// 内置圆头笔。参数语义对齐主流绘画软件：
@@ -69,6 +81,9 @@ pub struct RoundBrush {
     pub spacing: f32,
     /// 0..=0.95，EMA 位置平滑强度。
     pub smoothing: f32,
+    /// 0..=0.98 磁吸稳定器：强滞后抑抖，收笔时直线追赶补齐终点。
+    /// 0 = 关闭（保持原手感）。
+    pub stabilizer: f32,
     /// 压感→半径的 gamma 曲线，1 为线性。
     pub pressure_gamma: f32,
     pub color: Color,
@@ -84,15 +99,12 @@ impl Default for RoundBrush {
             flow: 1.0,
             spacing: 0.15,
             smoothing: 0.35,
+            stabilizer: 0.0,
             pressure_gamma: 1.0,
             color: Color::BLACK,
             mode: DabMode::Buildup,
         }
     }
-}
-
-fn lerp(a: f64, b: f64, f: f64) -> f64 {
-    a + (b - a) * f
 }
 
 impl RoundBrush {
@@ -135,7 +147,11 @@ impl StrokeGen for RoundBrush {
     }
 
     fn extend(&self, state: &mut StrokeState, sample: &PointerSample) -> Vec<Dab> {
-        let k = 1.0 - self.smoothing.clamp(0.0, 0.95) as f64;
+        state.raw = (sample.x, sample.y);
+        // 稳定器与轻平滑叠加：stabilizer 主导时每事件只前进 (1-stab) 比例，
+        // 高频输入下表现为强磁吸；收笔由 end() 直线追赶补齐
+        let stab = self.stabilizer.clamp(0.0, 0.98) as f64;
+        let k = (1.0 - self.smoothing.clamp(0.0, 0.95) as f64) * (1.0 - stab);
         state.smooth.0 = lerp(state.smooth.0, sample.x, k);
         state.smooth.1 = lerp(state.smooth.1, sample.y, k);
 
@@ -161,6 +177,31 @@ impl StrokeGen for RoundBrush {
 
         state.since_dab = (px, py);
         state.last_radius = radius;
+        dabs
+    }
+
+    fn end(&self, state: &mut StrokeState) -> Vec<Dab> {
+        // 稳定器滞后补偿：从当前平滑位置到最终原始样本直线补 dab
+        let (tx, ty) = state.raw;
+        let mut px = state.since_dab.0;
+        let mut py = state.since_dab.1;
+        let radius = state.last_radius;
+        let mut dabs = Vec::new();
+        loop {
+            let step = (self.spacing * (radius + state.last_radius)).max(0.75) as f64;
+            let dx = tx - px;
+            let dy = ty - py;
+            let remain = (dx * dx + dy * dy).sqrt();
+            if remain < f64::EPSILON || step > remain {
+                break;
+            }
+            let f = step / remain;
+            px = lerp(px, tx, f);
+            py = lerp(py, ty, f);
+            dabs.push(self.make_dab(px, py, radius));
+        }
+        dabs.push(self.make_dab(tx, ty, state.last_radius));
+        state.since_dab = (tx, ty);
         dabs
     }
 }
@@ -244,5 +285,84 @@ mod tests {
         StrokeGen::extend(&brush, &mut st, &PointerSample::mouse(100.0, 0.0));
         // 平滑后游标应落后于原始输入但已前进
         assert!(st.since_dab.0 < 100.0 && st.since_dab.0 > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod stabilizer_tests {
+    use super::*;
+    use crate::input::PointerKind;
+
+    fn sample(x: f64, y: f64) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: Some(1.0),
+            tilt: None,
+            kind: PointerKind::Pen,
+            id: 0,
+            t_us: 0,
+        }
+    }
+
+    /// 垂直抖动轨迹的 y 方差：稳定器应显著降低。
+    #[test]
+    fn stabilizer_reduces_jitter() {
+        let brush_off = RoundBrush {
+            smoothing: 0.0,
+            stabilizer: 0.0,
+            ..RoundBrush::default()
+        };
+        let brush_on = RoundBrush {
+            smoothing: 0.0,
+            stabilizer: 0.9,
+            ..RoundBrush::default()
+        };
+        let run = |brush: &RoundBrush| -> (f64, usize) {
+            let mut st = StrokeState::new(0.0, 50.0, 6.0);
+            StrokeGen::begin(brush, &mut st, &sample(0.0, 50.0));
+            let mut ys = vec![];
+            let mut dabs = 0;
+            for i in 0..400 {
+                // 每 2px 前进 + 交替 ±3px 抖动
+                let x = (i as f64) * 2.0;
+                let y = 50.0 + if i % 2 == 0 { 3.0 } else { -3.0 };
+                let d = StrokeGen::extend(brush, &mut st, &sample(x, y));
+                dabs += d.len();
+                ys.push(st.position().1);
+            }
+            let mean = ys.iter().sum::<f64>() / ys.len() as f64;
+            let var = ys.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / ys.len() as f64;
+            (var, dabs)
+        };
+        let (var_off, _) = run(&brush_off);
+        let (var_on, dabs_on) = run(&brush_on);
+        assert!(
+            var_on < var_off * 0.3,
+            "稳定器应显著抑抖: off={var_off:.3} on={var_on:.3}"
+        );
+        assert!(dabs_on > 0);
+    }
+
+    /// 收笔追赶：结束后应发射到最终原始样本位置。
+    #[test]
+    fn catch_up_reaches_final_point() {
+        let brush = RoundBrush {
+            smoothing: 0.0,
+            stabilizer: 0.95,
+            size: 10.0,
+            ..RoundBrush::default()
+        };
+        let mut st = StrokeState::new(0.0, 0.0, 5.0);
+        StrokeGen::begin(&brush, &mut st, &sample(0.0, 0.0));
+        // 一次大跳：平滑位置严重滞后
+        StrokeGen::extend(&brush, &mut st, &sample(500.0, 0.0));
+        let dabs = StrokeGen::end(&brush, &mut st);
+        let last = dabs.last().expect("应有追赶 dabs");
+        assert!(
+            (last.x - 500.0).abs() < 1e-6,
+            "终点应补到原始样本: {}",
+            last.x
+        );
     }
 }
