@@ -232,11 +232,25 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 - 结构撤销：UndoOp 枚举（Tiles/InsertLayer/RemoveLayer/MoveLayer），逆序应用、逆操作自动捕获，redo 重放前向顺序。
 - 手势状态机在引擎内（壳层只转发原始触摸事件），桌面/移动端行为一致。
 
-### M3（P1 后半）：iOS / Android
+### M3（P1 后半）：iOS / Android（Android 已完成，iOS 待议）
 
-- [ ] paint-ios：C ABI staticlib + Swift 薄壳（UIView 子类、Pencil 事件、Metal/CPU 呈现）
-- [ ] paint-android：cdylib + JNI + Kotlin View 子类、MotionEvent 历史点展开
-- [ ] 各端验收：真机绘画，压感正常，无输入延迟劣化
+- [ ] paint-ios：C ABI staticlib + Swift 薄壳（UIView 子类、Pencil 事件、Metal/CPU 呈现）——**待议**：方案与时点由后续讨论决定
+- [x] paint-android：cdylib + JNI + Kotlin View 子类、MotionEvent 历史点展开（2026-09-27）
+- [ ] Android 真机验收（需真机/模拟器实测；Rust 侧已通过 aarch64 + x86_64 交叉编译与 JNI 符号核对）
+
+Android 实现备注：
+
+- 呈现：`AndroidBitmap_lockPixels` 直接写 ARGB_8888 Bitmap（预乘一致，按 stride 拷贝，零中间缓冲），`onDraw` 驱动。
+- 输入：`ACTION_MOVE` 先展开 `getHistorical*` 批量历史点再发当前采样；笔/橡皮传 `getPressure` 压感，手指/鼠标传无压感；`ACTION_HOVER_*` + `TOOL_TYPE_STYLUS` → `PenInRange` 手掌拒绝；失焦自动收笔。
+- 手势（双指平移缩放/误触回滚）由引擎内置状态机处理，View 层只转发原始事件——与桌面/Web 行为一致。
+- demo：`crates/paint-android/android/`（Android Studio 直接打开），工具栏含保存 PNG 到系统相册。
+- 构建：NDK 交叉编译 .so → 拷入 jniLibs（步骤见 crate README）；.so 不入库。
+
+### M2.5 收尾补记（2026-09-27）
+
+- 浏览器实测（内置自动化）通过：加载/DPR 画布/压感正弦笔迹/撤销重做/橡皮/换色/新图层/PNG 导出（554KB blob）。
+- 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
+- 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
 ### M4（P2）：进阶能力
 
