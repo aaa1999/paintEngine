@@ -1,0 +1,15 @@
+[package]
+name = "paint-desktop"
+description = "桌面壳：winit 窗口 + softbuffer 呈现（Windows/macOS/Linux）"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "paint"
+path = "src/main.rs"
+
+[dependencies]
+paint-core = { path = "../paint-core" }
+paint-render = { path = "../paint-render" }
+winit = "0.30"
+softbuffer = "0.4"
