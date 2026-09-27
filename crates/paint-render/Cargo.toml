@@ -1,0 +1,8 @@
+[package]
+name = "paint-render"
+description = "Renderer trait 的软件实现：dab 盖章与脏区合成"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+paint-core = { path = "../paint-core" }

@@ -1,0 +1,7 @@
+[package]
+name = "paint-core"
+description = "平台无关的绘画引擎核心：瓦片/图层/撤销/视口/笔画/引擎骨架"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
