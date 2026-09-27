@@ -10,7 +10,7 @@
 cargo install wasm-pack
 
 # 2. 构建（产物输出到 www/pkg/）
-wasm-pack build crates/paint-wasm --target web --out-dir ../www/pkg --release
+wasm-pack build crates/paint-wasm --target web --out-dir www/pkg --release
 
 # 3. 起本地静态服务（任意方式均可）
 cd crates/paint-wasm/www && python3 -m http.server 8000

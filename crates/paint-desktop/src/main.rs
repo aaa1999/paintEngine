@@ -68,6 +68,8 @@ struct App {
     cursor: (f64, f64),
     t_us: u64,
     tool_before_erase: Option<paint_core::Tool>,
+    /// 按需重绘：任何输入/焦点/尺寸事件置位，画完即清。
+    needs_redraw: bool,
 }
 
 impl App {
@@ -84,6 +86,7 @@ impl App {
             cursor: (0.0, 0.0),
             t_us: 0,
             tool_before_erase: None,
+            needs_redraw: true,
         }
     }
 
@@ -143,6 +146,7 @@ impl App {
             h: size.height,
         };
         self.engine.render(&mut target);
+        self.needs_redraw = false;
     }
 }
 
@@ -200,6 +204,10 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // 所有可见变化都由事件驱动：置位重绘，空闲时不消耗 CPU
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.needs_redraw = true;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -359,10 +367,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // M1 简化策略：连续重绘保证平移/缩放/绘画即时反馈；
-        // 按需重绘调度留待性能优化阶段
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
+        // 按需重绘：仅事件驱动，空闲时零合成零呈现
+        if self.needs_redraw {
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
         }
     }
 }

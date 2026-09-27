@@ -37,7 +37,7 @@ pub struct PaintApp {
     /// 事件闭包必须保活（Drop 即解绑）
     keep: RefCell<Vec<PointerClosure>>,
     hover_keep: RefCell<Vec<IdleClosure>>,
-    raf_keep: RefCell<Option<IdleClosure>>,
+    raf_keep: RefCell<Option<Rc<RefCell<Option<IdleClosure>>>>>,
     observer: RefCell<Option<ResizeObserver>>,
 }
 
@@ -223,35 +223,37 @@ impl PaintApp {
     }
 
     fn start_render_loop(&self, inner: Rc<RefCell<Inner>>) {
-        let f: Rc<RefCell<Option<IdleClosure>>> = Rc::new(RefCell::new(None));
-        let g = f.clone();
-        let inner2 = inner.clone();
-        *g.borrow_mut() = Some(IdleClosure::new(move || {
-            {
-                let mut borrow = inner2.borrow_mut();
-                let Inner {
-                    engine,
-                    ctx,
-                    needs_render,
-                    ..
-                } = &mut *borrow;
-                if needs_render.get() {
-                    let mut surface = CanvasSurface { ctx };
-                    engine.render(&mut surface);
-                    needs_render.set(false);
+        // 自引用环：闭包经 Rc 槽位调用自身，槽位整体保活。
+        // 不能把闭包 take 出来单独存——回调内经槽位取自身会拿到空值 →
+        // panic 断链，渲染循环当场死亡。
+        let slot: Rc<RefCell<Option<IdleClosure>>> = Rc::new(RefCell::new(None));
+        let raf_inner = inner.clone();
+        let body_slot = slot.clone();
+        *slot.borrow_mut() = Some(IdleClosure::new(move || {
+            tick(&raf_inner);
+            if let Some(w) = web_sys::window() {
+                if let Some(cb) = body_slot.borrow().as_ref() {
+                    let _ = w.request_animation_frame(cb.as_ref().unchecked_ref());
                 }
             }
-            if let Some(w) = web_sys::window() {
-                let _ = w
-                    .request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref());
-            }
         }));
+
+        // 兜底：个别 webview 不派发 rAF，16ms 定时器保证渲染持续。
+        // 正常浏览器里 tick 因 needs_render 早退，几乎无额外开销。
+        let timer_inner = inner.clone();
+        let timer = IdleClosure::new(move || tick(&timer_inner));
+
         if let Some(w) = web_sys::window() {
-            let _ =
-                w.request_animation_frame(g.borrow().as_ref().unwrap().as_ref().unchecked_ref());
+            if let Some(cb) = slot.borrow().as_ref() {
+                let _ = w.request_animation_frame(cb.as_ref().unchecked_ref());
+            }
+            let _ = w.set_interval_with_callback_and_timeout_and_arguments_0(
+                timer.as_ref().unchecked_ref(),
+                16,
+            );
         }
-        let taken = g.borrow_mut().take();
-        *self.raf_keep.borrow_mut() = taken;
+        self.hover_keep.borrow_mut().push(timer);
+        *self.raf_keep.borrow_mut() = Some(slot);
     }
 }
 
@@ -308,6 +310,23 @@ fn dispatch(inner: &Rc<RefCell<Inner>>, phase: PointerPhase, e: &PointerEvent) {
     i.engine
         .handle_event(PlatformEvent::Pointer { phase, sample });
     i.needs_render.set(true);
+}
+
+/// 单次渲染节拍：尺寸检查 + 按需合成呈现。
+fn tick(inner: &Rc<RefCell<Inner>>) {
+    sync_size(inner); // 每帧检查：部分 webview 不派发 RO 回调
+    let mut borrow = inner.borrow_mut();
+    let Inner {
+        engine,
+        ctx,
+        needs_render,
+        ..
+    } = &mut *borrow;
+    if needs_render.get() {
+        let mut surface = CanvasSurface { ctx };
+        engine.render(&mut surface);
+        needs_render.set(false);
+    }
 }
 
 fn sync_size(inner: &Rc<RefCell<Inner>>) {
