@@ -23,6 +23,8 @@ pub struct Dab {
     /// 本 dab 的整体不透明度 0..=1。
     pub alpha: f32,
     pub mode: DabMode,
+    /// true = dst-out（橡皮擦），忽略 color/mode。
+    pub erase: bool,
 }
 
 /// 一笔的进行时状态（平滑位置、间距游标）。
@@ -120,6 +122,7 @@ impl RoundBrush {
             color: self.color,
             alpha: self.dab_alpha(),
             mode: self.mode,
+            erase: false,
         }
     }
 }
@@ -174,6 +177,7 @@ mod tests {
             pressure,
             tilt: None,
             kind: PointerKind::Pen,
+            id: 0,
             t_us: 0,
         }
     }

@@ -24,6 +24,7 @@ fn pen(phase: PointerPhase, x: f64, y: f64, pressure: f32) -> PlatformEvent {
             pressure: Some(pressure),
             tilt: None,
             kind: PointerKind::Pen,
+            id: 1,
             t_us: 0,
         },
     }

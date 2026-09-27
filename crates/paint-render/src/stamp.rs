@@ -72,9 +72,13 @@ fn stamp_tile(
                 continue;
             }
             let i = ((py * TILE + pxx) * 4) as usize;
-            match mode {
-                DabMode::Buildup => blend_over(&mut px[i..i + 4], cr, cg, cb, a),
-                DabMode::Wash => blend_wash(&mut px[i..i + 4], cr, cg, cb, a),
+            if dab.erase {
+                blend_erase(&mut px[i..i + 4], a);
+            } else {
+                match mode {
+                    DabMode::Buildup => blend_over(&mut px[i..i + 4], cr, cg, cb, a),
+                    DabMode::Wash => blend_wash(&mut px[i..i + 4], cr, cg, cb, a),
+                }
             }
         }
     }
@@ -127,6 +131,15 @@ fn blend_wash(px: &mut [u8], cr: f32, cg: f32, cb: f32, sa: f32) {
     }
 }
 
+/// dst-out 橡皮：预乘各通道同乘 (1−sa)，保持预乘不变式。
+fn blend_erase(px: &mut [u8], sa: f32) {
+    let k = 1.0 - sa;
+    px[0] = (px[0] as f32 * k + 0.5) as u8;
+    px[1] = (px[1] as f32 * k + 0.5) as u8;
+    px[2] = (px[2] as f32 * k + 0.5) as u8;
+    px[3] = (px[3] as f32 * k + 0.5) as u8;
+}
+
 fn to_u8(v: f32) -> u8 {
     (v * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
@@ -136,6 +149,7 @@ mod tests {
     use super::*;
     use paint_core::color::Color;
     use paint_core::layer::LayerStack;
+    use paint_core::UndoOp;
 
     fn layer() -> (LayerStack, paint_core::layer::LayerId) {
         let mut s = LayerStack::new();
@@ -152,6 +166,7 @@ mod tests {
             color: Color::BLACK,
             alpha: 1.0,
             mode,
+            erase: false,
         }
     }
 
@@ -236,8 +251,12 @@ mod tests {
             assert!(g.tiles.get(id).is_some(), "瓦片 {id:?} 应被创建");
         }
         let group = rec.finish("Stroke");
-        assert_eq!(group.tiles.len(), 4, "四个瓦片都记录了旧快照");
-        assert!(group.tiles.iter().all(|(_, _, old)| old.is_none()));
+        let tiles = match group.ops.first() {
+            Some(UndoOp::Tiles(v)) => v,
+            _ => panic!("应是瓦片操作"),
+        };
+        assert_eq!(tiles.len(), 4, "四个瓦片都记录了旧快照");
+        assert!(tiles.iter().all(|(_, _, old)| old.is_none()));
     }
 
     #[test]
@@ -257,6 +276,36 @@ mod tests {
             &mut rec,
         );
         let group = rec.finish("Stroke");
-        assert!(group.tiles.iter().all(|(_, _, old)| old.is_some()));
+        let tiles = match group.ops.first() {
+            Some(UndoOp::Tiles(v)) => v,
+            _ => panic!("应是瓦片操作"),
+        };
+        assert!(tiles.iter().all(|(_, _, old)| old.is_some()));
+    }
+
+    #[test]
+    fn erase_reduces_alpha() {
+        let (mut layers, lid) = layer();
+        // 先画不透明黑
+        stamp_dabs(
+            layers.get_mut(lid),
+            &[dab_at(50.0, 50.0, 8.0, DabMode::Buildup)],
+            &mut StrokeRecorder::new(lid),
+        );
+        assert_eq!(pixel(&layers, lid, 50, 50)[3], 255);
+        // 硬橡皮擦中心
+        let eraser = Dab {
+            erase: true,
+            ..dab_at(50.0, 50.0, 4.0, DabMode::Buildup)
+        };
+        stamp_dabs(
+            layers.get_mut(lid),
+            &[eraser],
+            &mut StrokeRecorder::new(lid),
+        );
+        let c = pixel(&layers, lid, 50, 50);
+        assert_eq!(c[3], 0, "中心应被完全擦除");
+        // 预乘不变式：alpha 0 则 RGB 也为 0
+        assert_eq!(&c[..3], &[0, 0, 0]);
     }
 }

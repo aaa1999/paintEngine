@@ -66,7 +66,8 @@ pub type TileRef = Arc<TileData>;
 
 /// 稀疏瓦片网格：无限画布的存储层。
 /// 不存在的瓦片等价于全透明，因此 `prune` 可安全回收空瓦片。
-#[derive(Default)]
+/// Clone 为 Arc 共享浅拷贝，写入时 COW。
+#[derive(Default, Clone)]
 pub struct TileGrid {
     tiles: HashMap<TileId, TileRef>,
 }

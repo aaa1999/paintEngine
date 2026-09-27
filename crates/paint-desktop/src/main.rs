@@ -67,6 +67,7 @@ struct App {
     drag: Drag,
     cursor: (f64, f64),
     t_us: u64,
+    tool_before_erase: Option<paint_core::Tool>,
 }
 
 impl App {
@@ -82,6 +83,7 @@ impl App {
             drag: Drag::None,
             cursor: (0.0, 0.0),
             t_us: 0,
+            tool_before_erase: None,
         }
     }
 
@@ -93,6 +95,7 @@ impl App {
             pressure: None,
             tilt: None,
             kind: PointerKind::Mouse,
+            id: 0,
             t_us: self.t_us,
         }
     }
@@ -105,6 +108,25 @@ impl App {
         }
         self.engine
             .handle_event(PlatformEvent::Resize { w, h, scale });
+    }
+
+    fn toggle_eraser(&mut self) {
+        let next = if self.engine.tool() == paint_core::Tool::Eraser {
+            paint_core::Tool::Brush
+        } else {
+            paint_core::Tool::Eraser
+        };
+        self.engine.set_tool(next);
+    }
+
+    fn save_png(&mut self) {
+        match self.engine.export_png(None, 1.0, false) {
+            Some(png) => match std::fs::write("painting.png", &png) {
+                Ok(()) => println!("已导出 painting.png ({} KB)", png.len() / 1024),
+                Err(e) => eprintln!("导出失败: {e}"),
+            },
+            None => eprintln!("画布为空，未导出"),
+        }
     }
 
     fn draw(&mut self) {
@@ -153,8 +175,9 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("paintEngine — 左键绘画 · 中键/空格平移 · 滚轮缩放 · Ctrl+Z 撤销");
+        let attrs = Window::default_attributes().with_title(
+            "paintEngine — 左键画/右键擦 · B/E 工具 · Ctrl+Z 撤销 · Ctrl+Shift+N 图层 · Ctrl+E 合并 · Ctrl+S 导出",
+        );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -225,6 +248,32 @@ impl ApplicationHandler for App {
                     }
                     self.drag = Drag::None;
                 }
+                // 右键拖动 = 临时橡皮（松开恢复原工具）
+                (ElementState::Pressed, MouseButton::Right) => {
+                    if self.drag == Drag::None {
+                        self.tool_before_erase = Some(self.engine.tool());
+                        self.engine.set_tool(paint_core::Tool::Eraser);
+                        self.drag = Drag::Stroke;
+                        let sample = self.pointer_sample();
+                        self.engine.handle_event(PlatformEvent::Pointer {
+                            phase: PointerPhase::Down,
+                            sample,
+                        });
+                    }
+                }
+                (ElementState::Released, MouseButton::Right) => {
+                    if self.drag == Drag::Stroke {
+                        let sample = self.pointer_sample();
+                        self.engine.handle_event(PlatformEvent::Pointer {
+                            phase: PointerPhase::Up,
+                            sample,
+                        });
+                    }
+                    if let Some(t) = self.tool_before_erase.take() {
+                        self.engine.set_tool(t);
+                    }
+                    self.drag = Drag::None;
+                }
                 (ElementState::Pressed, MouseButton::Middle) => {
                     self.drag = Drag::Pan { last: self.cursor };
                 }
@@ -268,6 +317,25 @@ impl ApplicationHandler for App {
                             }
                             "y" | "Y" if ctrl => {
                                 self.engine.redo();
+                            }
+                            "n" | "N" if ctrl && shift => {
+                                self.engine.add_layer();
+                            }
+                            "e" | "E" if ctrl => {
+                                self.engine.merge_down();
+                            }
+                            "f" | "F" if ctrl => {
+                                self.engine.flatten();
+                            }
+                            "s" | "S" if ctrl => {
+                                self.save_png();
+                            }
+                            "e" | "E" if !ctrl => {
+                                // B/E 在画笔/橡皮间切换
+                                self.toggle_eraser();
+                            }
+                            "b" | "B" => {
+                                self.engine.set_tool(paint_core::Tool::Brush);
                             }
                             "[" => {
                                 let b = self.engine.brush_mut();

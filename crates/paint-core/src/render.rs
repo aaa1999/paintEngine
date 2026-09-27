@@ -17,7 +17,20 @@ pub trait Renderer: Send {
 
     /// 合成可见图层到目标缓冲（RGBA8 预乘，行主序，尺寸 `width` ×
     /// `target.len()/width/4`），只处理 `dirty` 区域。
-    fn composite(&mut self, doc: &Document, target: &mut [u8], width: u32, dirty: Rect);
+    /// `background: None` 输出保持透明（PNG 导出等场合）。
+    fn composite(
+        &mut self,
+        doc: &Document,
+        target: &mut [u8],
+        width: u32,
+        dirty: Rect,
+        background: Option<Color>,
+    );
+
+    /// 把 `src`（按其 opacity/blend_mode/visible）合入 `dst`。
+    /// merge_down/flatten/导入用。`recorder` 记录 dst 被改写的瓦片
+    /// （撤销依赖），不需要时传 `&mut StrokeRecorder` 空对象亦可。
+    fn merge_layers(&mut self, dst: &mut Layer, src: &Layer, recorder: &mut StrokeRecorder);
 }
 
 /// 呈现目标。平台壳实现：桌面 softbuffer、Web canvas、

@@ -18,6 +18,8 @@ pub struct PointerSample {
     /// 弧度。
     pub tilt: Option<(f32, f32)>,
     pub kind: PointerKind,
+    /// 指针唯一标识（多指追踪与手势识别用）。
+    pub id: u64,
     /// 微秒时间戳。Web `pointerrawupdate` 与 Android 历史点
     /// 都会一次给一串不同时刻的采样，稳定/速度计算依赖它。
     pub t_us: u64,
@@ -31,6 +33,7 @@ impl PointerSample {
             pressure: None,
             tilt: None,
             kind: PointerKind::Mouse,
+            id: 0,
             t_us: 0,
         }
     }
