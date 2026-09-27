@@ -192,6 +192,28 @@ impl PaintApp {
     }
 
     /// 100% 缩放（保持屏幕中心不动）。
+    /// 绕屏幕中心旋转视图（弧度）；翻转/复位同族操作。
+    pub fn rotate_view(&self, delta: f64) {
+        self.mark_render(|e| {
+            e.rotate_view(delta);
+            true
+        });
+    }
+
+    pub fn flip_view(&self) {
+        self.mark_render(|e| {
+            e.flip_view();
+            true
+        });
+    }
+
+    pub fn reset_view_transform(&self) {
+        self.mark_render(|e| {
+            e.document_mut().viewport_mut().reset_transform();
+            true
+        });
+    }
+
     pub fn zoom_100(&self) {
         self.mark_render(|e| {
             e.zoom_100();

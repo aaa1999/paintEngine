@@ -244,7 +244,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes().with_title(
-            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · Ctrl+S 存工程 · Ctrl+Z 撤销",
+            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · R 旋转 · H 翻转 · Ctrl+R 复位 · Ctrl+S 存工程 · Ctrl+Z 撤销",
         );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -413,6 +413,25 @@ impl ApplicationHandler for App {
                             }
                             "1" if ctrl => {
                                 self.engine.zoom_100();
+                            }
+                            "r" | "R" if ctrl => {
+                                self.engine.document_mut().viewport_mut().reset_transform();
+                            }
+                            "r" | "R" => {
+                                let delta: f64 = if self.modifiers.shift_key() {
+                                    -15.0
+                                } else {
+                                    15.0
+                                };
+                                let anchor = self.cursor;
+                                self.engine
+                                    .document_mut()
+                                    .viewport_mut()
+                                    .rotate_by(anchor, delta.to_radians());
+                            }
+                            "h" | "H" => {
+                                let anchor = self.cursor;
+                                self.engine.document_mut().viewport_mut().flip_x_at(anchor);
                             }
                             "t" | "T" => {
                                 // 稳定器档位循环：0 → 50% → 85% → 0

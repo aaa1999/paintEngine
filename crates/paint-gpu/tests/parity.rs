@@ -203,3 +203,50 @@ fn dirty_incremental_matches_full() {
         &full_frame[outside..outside + 4]
     );
 }
+
+#[test]
+fn parity_rotation() {
+    // 旋转 30° + 缩放，两后端逐像素对齐（nearest 路径）
+    let mut doc = scene(BlendMode::Multiply);
+    doc.viewport_mut().set_zoom(1.7);
+    doc.viewport_mut().rotate_by((80.0, 70.0), 0.52);
+    let (cpu, gpu) = run_pair(&doc, 200, 180);
+    assert_close(&cpu, &gpu, 2, "rotate 0.52 rad");
+}
+
+#[test]
+fn parity_flip() {
+    let mut doc = scene(BlendMode::Screen);
+    doc.viewport_mut().set_zoom(1.0);
+    doc.viewport_mut().flip_x_at((100.0, 90.0));
+    let (cpu, gpu) = run_pair(&doc, 200, 180);
+    assert_close(&cpu, &gpu, 2, "flip x");
+}
+
+#[test]
+fn rotation_moves_content_cpu_selfcheck() {
+    // CPU 自检：90° 旋转下方块位置符合旋转矩阵（粗验证语义而非巧合对齐）
+    let mut doc = Document::new(usize::MAX);
+    doc.set_background(Color::WHITE);
+    let lid = doc.active_layer();
+    {
+        let layer = doc.layers_mut().get_mut(lid);
+        layer
+            .tiles
+            .get_or_create_mut(paint_core::TileId { x: 0, y: 0 })
+            .pixels_mut()[0..4]
+            .copy_from_slice(&[0, 0, 0, 255]); // 画布 (0,0) 黑点
+    }
+    // 视口：zoom 1 pan 0 → 画布(0,0)在屏幕(0,0)；绕屏幕中心 (50,45) 转 90°
+    doc.viewport_mut()
+        .rotate_by((50.0, 45.0), std::f64::consts::FRAC_PI_2);
+    // (0,0) 相对锚点 (-50,-45)，逆时针 90°（屏幕 y 向下为顺时针视觉）→ (c,-s)·v = (0·-50 -1·-45, 1·-50+0·-45)=(45,-50) → 屏幕锚点+(45,-50) = (95, -5) 屏幕外。
+    // 改验证 canvas_to_screen 往返已知点即可
+    let vp = doc.viewport();
+    let (sx, sy) = vp.canvas_to_screen(0.0, 0.0);
+    let expect = (50.0 + 45.0, 45.0 - 50.0);
+    assert!(
+        (sx - expect.0).abs() < 1e-9 && (sy - expect.1).abs() < 1e-9,
+        "({sx},{sy})"
+    );
+}

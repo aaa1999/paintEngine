@@ -31,14 +31,36 @@ fn scene(w: u32, h: u32, layers: usize) -> Document {
     // 底层
     let l = doc.active_layer();
     let dabs: Vec<_> = (0..layers * 40)
-        .map(|i| dab(40.0 + (i % 40) as f64 * (w as f64 - 80.0) / 40.0, 60.0 + (i / 40) as f64 * 40.0, 24.0, Color::BLACK))
+        .map(|i| {
+            dab(
+                40.0 + (i % 40) as f64 * (w as f64 - 80.0) / 40.0,
+                60.0 + (i / 40) as f64 * 40.0,
+                24.0,
+                Color::BLACK,
+            )
+        })
         .collect();
-    paint_render::stamp_dabs(doc.layers_mut().get_mut(l), &dabs, &mut StrokeRecorder::new(l));
+    paint_render::stamp_dabs(
+        doc.layers_mut().get_mut(l),
+        &dabs,
+        &mut StrokeRecorder::new(l),
+    );
     for k in 1..layers {
         let id = doc.layers_mut().insert(None);
         let layer = doc.layers_mut().get_mut(id);
         let dabs: Vec<_> = (0..40)
-            .map(|i| dab(40.0 + i as f64 * (w as f64 - 80.0) / 40.0, (h as f64 / 2.0) + (k as f64 * 12.0), 18.0, Color { r: 30 + k as u8 * 40, g: 100, b: 200 - k as u8 * 30 }))
+            .map(|i| {
+                dab(
+                    40.0 + i as f64 * (w as f64 - 80.0) / 40.0,
+                    (h as f64 / 2.0) + (k as f64 * 12.0),
+                    18.0,
+                    Color {
+                        r: 30 + k as u8 * 40,
+                        g: 100,
+                        b: 200 - k as u8 * 30,
+                    },
+                )
+            })
             .collect();
         paint_render::stamp_dabs(layer, &dabs, &mut StrokeRecorder::new(id));
         layer.blend_mode = BlendMode::ALL[k % BlendMode::ALL.len()];
@@ -73,8 +95,6 @@ fn main() {
         let cpu_ms = bench("CPU 全量", |buf| {
             cpu.composite(&doc, buf, w, full, Some(Color::WHITE));
         });
-        drop(cpu);
-
         let Some(mut gpu) = WgpuRenderer::new() else {
             println!("GPU 不可用，跳过");
             return;

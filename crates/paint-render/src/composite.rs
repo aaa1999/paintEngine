@@ -42,35 +42,68 @@ pub fn composite(
     let zoom = vp.zoom();
     let (pan_x, pan_y) = vp.pan();
     let inv_zoom = 1.0 / zoom;
-    // 放大（>1）才双线性；1:1 时像素中心正落在源像素上，
-    // 双线性反而混合相邻像素造成模糊
-    let bilinear = zoom > 1.0;
-    // 每行常数增量：canvas_x = x*inv + row_base_x
+    // 放大（>1）且恒等变换才双线性：1:1 双线性反而模糊；
+    // 旋转/翻转下双线性邻域会跨瓦片（接缝），统一走最近邻
+    let ident = vp.transform_ident();
+    let bilinear = zoom > 1.0 && ident;
+    let (rot_c, rot_s) = (vp.rotation().cos(), vp.rotation().sin());
+    let flip = vp.flip_x();
+    // 恒等时的行内增量优化；旋转/翻转退化为每像素全算
     let row_base_x = (0.5 - pan_x) * inv_zoom;
-    let step_x = inv_zoom;
+    let step_x = if ident { inv_zoom } else { f64::NAN };
 
     for layer in doc.layers().iter().filter(|l| l.visible && l.opacity > 0.0) {
         let opacity = layer.opacity.clamp(0.0, 1.0);
         let mode = layer.blend_mode;
         for y in clip.y..(clip.y + clip.h as i32) {
-            let cy = (y as f64 + 0.5 - pan_y) * inv_zoom;
-            let iy = cy.floor() as i64;
-            let ty = iy >> 8; // 瓦片索引（负坐标下算术移位正确）
-            let fy = cy - ((ty << 8) as f64); // 瓦片内浮点 y（双线性用）
-            let ly = (iy & 255) as usize; // 瓦片内 y 偏移（最近邻用）
+            let py = y as f64 + 0.5 - pan_y;
+            let cx_row_ident = row_base_x + clip.x as f64 * step_x;
+
+            // 先按行中心 y 定位瓦片行（恒等优化；旋转时按像素定位）
+            let cy_probe = if ident { py * inv_zoom } else { 0.0 };
+            let iy0 = if ident { cy_probe.floor() as i64 } else { 0 };
+            let ty0 = iy0 >> 8;
+            let fy = if ident {
+                cy_probe - ((ty0 << 8) as f64)
+            } else {
+                0.0
+            };
+            let ly = (iy0 & 255) as usize;
             let row = (y as u32 * width) as usize * 4;
 
-            // 瓦片行内缓存：x 单调递增，瓦片 id 只增不减
+            // 瓦片行内缓存：x 单调递增，瓦片 id 只增不减（恒等时有效；
+            // 旋转下 x 单调但 canvas 不单调，退化为每像素查缓存键）
             let mut cache_key = u64::MAX;
             let mut cache: Option<&TileData> = None;
 
-            let mut cx = row_base_x + clip.x as f64 * step_x;
+            let mut cx_ident = cx_row_ident;
             for x in clip.x..(clip.x + clip.w as i32) {
-                let cx_cur = cx;
-                cx += step_x;
+                let (cx_cur, cy_cur) = if ident {
+                    let v = cx_ident;
+                    cx_ident += step_x;
+                    (v, cy_probe)
+                } else {
+                    // f32 全链与 GPU 着色器同精度：最近邻 floor 边界不因
+                    // f64/f32 差异翻转到邻 texel（渐变边缘差值会被放大）
+                    let px = x as f32 + 0.5 - pan_x as f32;
+                    let pyf = py as f32;
+                    let rx = rot_c as f32 * px + rot_s as f32 * pyf;
+                    let ry = -rot_s as f32 * px + rot_c as f32 * pyf;
+                    let fx = if flip { -rx } else { rx };
+                    let iz = inv_zoom as f32;
+                    ((fx * iz) as f64, (ry * iz) as f64)
+                };
                 let ix = cx_cur.floor() as i64;
                 let tx = ix >> 8;
                 let fx = cx_cur - ((tx << 8) as f64); // 瓦片内浮点 x
+                                                      // 旋转下 y 每像素变化
+                let (ty, fy, ly) = if ident {
+                    (ty0, fy, ly)
+                } else {
+                    let iy = cy_cur.floor() as i64;
+                    let t = iy >> 8;
+                    (t, cy_cur - ((t << 8) as f64), (iy & 255) as usize)
+                };
                 let lx = (ix & 255) as usize; // 最近邻 x 偏移
 
                 let key = ((ty as u32 as u64) << 32) | (tx as u32 as u64);

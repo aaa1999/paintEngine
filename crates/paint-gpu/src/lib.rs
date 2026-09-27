@@ -39,6 +39,10 @@ struct VpUniform {
     grid_on: f32,
     bg: [f32; 4],
     dot_rgb: [f32; 4],
+    rot_c: f32,
+    rot_s: f32,
+    flip: f32,
+    _pad: f32,
 }
 
 #[repr(C)]
@@ -449,11 +453,23 @@ impl Renderer for WgpuRenderer {
                 if background.is_some() { 1.0 } else { 0.0 },
             ],
             dot_rgb: [mixc(bg.r), mixc(bg.g), mixc(bg.b), 1.0],
+            rot_c: vp.rotation().cos() as f32,
+            rot_s: vp.rotation().sin() as f32,
+            flip: if vp.flip_x() { 1.0 } else { 0.0 },
+            _pad: 0.0,
         };
 
-        // 脏区（画布空间）覆盖的瓦片范围
-        let (cx0, cy0) = vp.screen_to_canvas(region.x as f64, region.y as f64);
-        let (cx1, cy1) = vp.screen_to_canvas(region.x2() as f64, region.y2() as f64);
+        // 脏区覆盖的瓦片范围：region 四角逆变换到画布取 AABB（旋转安全）
+        let corners = [
+            vp.screen_to_canvas(region.x as f64, region.y as f64),
+            vp.screen_to_canvas(region.x2() as f64, region.y as f64),
+            vp.screen_to_canvas(region.x as f64, region.y2() as f64),
+            vp.screen_to_canvas(region.x2() as f64, region.y2() as f64),
+        ];
+        let cx0 = corners.iter().map(|c| c.0).fold(f64::MAX, f64::min);
+        let cy0 = corners.iter().map(|c| c.1).fold(f64::MAX, f64::min);
+        let cx1 = corners.iter().map(|c| c.0).fold(f64::MIN, f64::max);
+        let cy1 = corners.iter().map(|c| c.1).fold(f64::MIN, f64::max);
         let tx0 = (cx0.floor() as i64) >> 8;
         let ty0 = (cy0.floor() as i64) >> 8;
         let tx1 = (cx1.ceil() as i64) >> 8;
@@ -481,7 +497,8 @@ impl Renderer for WgpuRenderer {
             self.tile_texture(*l, *id, t);
         }
 
-        let bilinear = zoom > 1.0;
+        // 与 CPU 同规则：旋转/翻转下走最近邻（双线性邻域跨瓦片有接缝）
+        let bilinear = zoom > 1.0 && vp.transform_ident();
         let sampler = if bilinear {
             &self.linear
         } else {
@@ -628,17 +645,22 @@ impl Renderer for WgpuRenderer {
                         ],
                         label: Some("tile"),
                     });
-                    // 瓦片屏幕矩形 ∩ 脏区
-                    let (sx, sy) = (
-                        (tx << 8) as f64 * zoom + pan_x,
-                        (ty << 8) as f64 * zoom + pan_y,
-                    );
-                    let (sw, sh) = (256.0 * zoom, 256.0 * zoom);
+                    // 瓦片屏幕包围盒（4 角变换 AABB，旋转安全）∩ 脏区
+                    let corners = [
+                        vp.canvas_to_screen((tx << 8) as f64, (ty << 8) as f64),
+                        vp.canvas_to_screen(((tx + 1) << 8) as f64, (ty << 8) as f64),
+                        vp.canvas_to_screen((tx << 8) as f64, ((ty + 1) << 8) as f64),
+                        vp.canvas_to_screen(((tx + 1) << 8) as f64, ((ty + 1) << 8) as f64),
+                    ];
+                    let x0 = corners.iter().map(|c| c.0).fold(f64::MAX, f64::min);
+                    let y0 = corners.iter().map(|c| c.1).fold(f64::MAX, f64::min);
+                    let x1 = corners.iter().map(|c| c.0).fold(f64::MIN, f64::max);
+                    let y1 = corners.iter().map(|c| c.1).fold(f64::MIN, f64::max);
                     let tile_rect = Rect::new(
-                        sx.floor() as i32,
-                        sy.floor() as i32,
-                        (sw.ceil() as u32).max(1),
-                        (sh.ceil() as u32).max(1),
+                        x0.floor() as i32,
+                        y0.floor() as i32,
+                        (x1.ceil() as i64 - x0.floor() as i64).max(1) as u32,
+                        (y1.ceil() as i64 - y0.floor() as i64).max(1) as u32,
                     );
                     let Some(sc) = tile_rect.intersect(&region) else {
                         continue;

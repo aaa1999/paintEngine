@@ -12,6 +12,10 @@ pub struct Viewport {
     /// 画布原点在屏幕上的偏移（物理像素）。
     pan_x: f64,
     pan_y: f64,
+    /// 旋转角（弧度，绕屏幕锚点应用）。
+    rotation: f64,
+    /// 水平翻转。
+    flip_x: bool,
     rev: u64,
 }
 
@@ -30,8 +34,63 @@ impl Viewport {
             zoom: 1.0,
             pan_x: 0.0,
             pan_y: 0.0,
+            rotation: 0.0,
+            flip_x: false,
             rev: 0,
         }
+    }
+
+    pub fn rotation(&self) -> f64 {
+        self.rotation
+    }
+
+    pub fn flip_x(&self) -> bool {
+        self.flip_x
+    }
+
+    /// 恒等变换（无旋转无翻转）——合成器据此启用双线性快速路径。
+    pub fn transform_ident(&self) -> bool {
+        self.rotation == 0.0 && !self.flip_x
+    }
+
+    /// 绕屏幕锚点旋转 delta 弧度（锚点下画布内容保持不动）。
+    pub fn rotate_by(&mut self, anchor: (f64, f64), delta: f64) {
+        // anchor_canvas_vec 返回的就是缩放后向量（F·R⁻¹(a−pan)）
+        let (czx, czy) = self.anchor_canvas_vec(anchor);
+        self.rotation += delta;
+        let (c, s) = (self.rotation.cos(), self.rotation.sin());
+        let fx = if self.flip_x { -czx } else { czx };
+        self.pan_x = anchor.0 - (c * fx - s * czy);
+        self.pan_y = anchor.1 - (s * fx + c * czy);
+        self.rev += 1;
+    }
+
+    /// 绕屏幕锚点水平翻转。
+    pub fn flip_x_at(&mut self, anchor: (f64, f64)) {
+        // 保持 R 之后的向量不变：F·cz（按旧 flip 计算）在新变换下重现锚点
+        let (czx, czy) = self.anchor_canvas_vec(anchor);
+        let v = (if self.flip_x { -czx } else { czx }, czy);
+        self.flip_x = !self.flip_x;
+        let (c, s) = (self.rotation.cos(), self.rotation.sin());
+        self.pan_x = anchor.0 - (c * v.0 - s * v.1);
+        self.pan_y = anchor.1 - (s * v.0 + c * v.1);
+        self.rev += 1;
+    }
+
+    /// 复位旋转/翻转（保持缩放与平移语义重置）。
+    pub fn reset_transform(&mut self) {
+        self.rotation = 0.0;
+        self.flip_x = false;
+        self.rev += 1;
+    }
+
+    /// 锚点相对 pan 的"缩放后画布向量"（含翻转的正向变换逆解）。
+    fn anchor_canvas_vec(&self, anchor: (f64, f64)) -> (f64, f64) {
+        let d = (anchor.0 - self.pan_x, anchor.1 - self.pan_y);
+        let (c, s) = (self.rotation.cos(), self.rotation.sin());
+        let rx = c * d.0 + s * d.1;
+        let ry = -s * d.0 + c * d.1;
+        (if self.flip_x { -rx } else { rx }, ry)
     }
 
     pub fn revision(&self) -> u64 {
@@ -93,12 +152,21 @@ impl Viewport {
         self.rev += 1;
     }
 
+    /// 完整变换：canvas = F⁻¹·R⁻¹·(screen - pan) / zoom。
     pub fn screen_to_canvas(&self, x: f64, y: f64) -> (f64, f64) {
-        ((x - self.pan_x) / self.zoom, (y - self.pan_y) / self.zoom)
+        let (rx, ry) = self.anchor_canvas_vec((x, y));
+        (rx / self.zoom, ry / self.zoom)
     }
 
+    /// 完整变换：screen = R·F·canvas·zoom + pan。
     pub fn canvas_to_screen(&self, x: f64, y: f64) -> (f64, f64) {
-        (x * self.zoom + self.pan_x, y * self.zoom + self.pan_y)
+        let mut px = x * self.zoom;
+        if self.flip_x {
+            px = -px;
+        }
+        let py = y * self.zoom;
+        let (c, s) = (self.rotation.cos(), self.rotation.sin());
+        (c * px - s * py + self.pan_x, s * px + c * py + self.pan_y)
     }
 }
 
@@ -150,6 +218,39 @@ mod tests {
         assert_eq!(vp.zoom(), 1.0);
         let (cx, cy) = vp.screen_to_canvas(400.0, 300.0);
         assert!(cx.abs() < 1e-9 && cy.abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotation_roundtrip_and_anchor() {
+        let mut vp = Viewport::new();
+        vp.pan_by(120.0, -80.0);
+        vp.set_zoom(2.0);
+        vp.rotate_by((300.0, 200.0), 0.7);
+        vp.flip_x_at((300.0, 200.0));
+        assert!(!vp.transform_ident());
+        let (cx, cy) = vp.screen_to_canvas(123.0, 456.0);
+        let (sx, sy) = vp.canvas_to_screen(cx, cy);
+        assert!((sx - 123.0).abs() < 1e-9 && (sy - 456.0).abs() < 1e-9);
+        // 旋转的锚点稳定性
+        let (ax, ay) = vp.screen_to_canvas(300.0, 200.0);
+        vp.rotate_by((300.0, 200.0), -1.3);
+        let (bx, by) = vp.screen_to_canvas(300.0, 200.0);
+        assert!(
+            (ax - bx).abs() < 1e-9 && (ay - by).abs() < 1e-9,
+            "旋转应保锚点"
+        );
+        // 翻转镜像语义：x 取反、y 不变；翻两次复原
+        vp.flip_x_at((300.0, 200.0));
+        let (cx, cy) = vp.screen_to_canvas(300.0, 200.0);
+        assert!(
+            (cx + bx).abs() < 1e-9 && (cy - by).abs() < 1e-9,
+            "翻转应镜像 x"
+        );
+        vp.flip_x_at((300.0, 200.0));
+        let (dx, dy) = vp.screen_to_canvas(300.0, 200.0);
+        assert!((dx - bx).abs() < 1e-9 && (dy - by).abs() < 1e-9);
+        vp.reset_transform();
+        assert!(vp.transform_ident());
     }
 
     #[test]

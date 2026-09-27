@@ -126,6 +126,30 @@ impl Engine {
         self.dirty = Dirty::All;
     }
 
+    /// 绕屏幕中心旋转视图。
+    pub fn rotate_view(&mut self, delta: f64) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.doc
+            .viewport_mut()
+            .rotate_by((w as f64 / 2.0, h as f64 / 2.0), delta);
+        self.dirty = Dirty::All;
+    }
+
+    /// 绕屏幕中心水平翻转视图。
+    pub fn flip_view(&mut self) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        self.doc
+            .viewport_mut()
+            .flip_x_at((w as f64 / 2.0, h as f64 / 2.0));
+        self.dirty = Dirty::All;
+    }
+
     /// 100% 缩放，保持屏幕中心内容不动。
     pub fn zoom_100(&mut self) {
         let (w, h) = self.size;
@@ -671,8 +695,19 @@ impl Engine {
     fn expand_dirty(&mut self, dab: &Dab) {
         let r = dab.radius as f64 + 1.0;
         let vp = self.doc.viewport();
-        let (x0, y0) = vp.canvas_to_screen(dab.x - r, dab.y - r);
-        let (x1, y1) = vp.canvas_to_screen(dab.x + r, dab.y + r);
+        // 旋转下对角两点不再是包围盒：四角变换取 AABB
+        let corners = [
+            vp.canvas_to_screen(dab.x - r, dab.y - r),
+            vp.canvas_to_screen(dab.x + r, dab.y - r),
+            vp.canvas_to_screen(dab.x - r, dab.y + r),
+            vp.canvas_to_screen(dab.x + r, dab.y + r),
+        ];
+        let xs = [corners[0].0, corners[1].0, corners[2].0, corners[3].0];
+        let ys = [corners[0].1, corners[1].1, corners[2].1, corners[3].1];
+        let x0 = xs.iter().cloned().fold(f64::MAX, f64::min);
+        let y0 = ys.iter().cloned().fold(f64::MAX, f64::min);
+        let x1 = xs.iter().cloned().fold(f64::MIN, f64::max);
+        let y1 = ys.iter().cloned().fold(f64::MIN, f64::max);
         let fx = x0.floor() as i32;
         let fy = y0.floor() as i32;
         let rect = Rect::new(

@@ -14,6 +14,10 @@ struct Vp {
     grid_on: f32,
     bg: vec4<f32>,      // rgb + alpha（透明导出为 0）
     dot_rgb: vec4<f32>, // 网格点颜色
+    rot_c: f32,
+    rot_s: f32,
+    flip: f32,
+    _pad: f32,
 };
 
 struct Vout {
@@ -28,9 +32,13 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> Vout {
     return out;
 }
 
-// 屏幕像素坐标（左上原点）→ 画布坐标
+// 屏幕像素坐标（左上原点）→ 画布坐标（含旋转/翻转的通用逆变换）
 fn canvas_coord(px: f32, py_top: f32, vp: Vp) -> vec2<f32> {
-    return (vec2<f32>(px + 0.5, py_top + 0.5) - vec2<f32>(vp.pan_x, vp.pan_y)) * vp.inv_zoom;
+    let d = vec2<f32>(px + 0.5, py_top + 0.5) - vec2<f32>(vp.pan_x, vp.pan_y);
+    let rx = vp.rot_c * d.x + vp.rot_s * d.y;
+    let ry = -vp.rot_s * d.x + vp.rot_c * d.y;
+    let fx = select(rx, -rx, vp.flip > 0.5);
+    return vec2<f32>(fx, ry) * vp.inv_zoom;
 }
 
 // ── 背景网格通道 ──
