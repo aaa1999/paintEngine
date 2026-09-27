@@ -57,6 +57,10 @@ class PaintEngineView @JvmOverloads constructor(
     private external fun nativeAddLayer(handle: Long): Boolean
     private external fun nativeMergeDown(handle: Long): Boolean
     private external fun nativeFlatten(handle: Long): Boolean
+    private external fun nativeLayerCount(handle: Long): Int
+    private external fun nativeActiveLayerIndex(handle: Long): Int
+    private external fun nativeSelectLayerIndex(handle: Long, index: Int): Boolean
+    private external fun nativeLayerNameAt(handle: Long, index: Int): String?
     private external fun nativeFitToContent(handle: Long)
     private external fun nativeZoom100(handle: Long)
     private external fun nativeSetShowGrid(handle: Long, show: Boolean)
@@ -187,6 +191,13 @@ class PaintEngineView @JvmOverloads constructor(
     fun addLayer(): Boolean = nativeAddLayer(handle)
     fun mergeDown(): Boolean = nativeMergeDown(handle)
     fun flatten(): Boolean = nativeFlatten(handle)
+    fun layerCount(): Int = nativeLayerCount(handle)
+    fun activeLayerIndex(): Int = nativeActiveLayerIndex(handle)
+    fun selectLayerIndex(index: Int): Boolean = nativeSelectLayerIndex(handle, index)
+    fun layerNameAt(index: Int): String? = nativeLayerNameAt(handle, index)?.let {
+        // 名字里带栈位信息便于调试：格式 "图层 N"
+        it
+    }
     fun fitToContent() = nativeFitToContent(handle)
     fun zoom100() = nativeZoom100(handle)
     fun setShowGrid(show: Boolean) = nativeSetShowGrid(handle, show)

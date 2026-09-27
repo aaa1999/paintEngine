@@ -246,6 +246,58 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFlatte
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLayerCount(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jint {
+    engine(handle).layer_count() as jint
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeActiveLayerIndex(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jint {
+    engine(handle)
+        .active_layer_index()
+        .map_or(-1, |i| i as jint)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSelectLayerIndex(
+    _env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    index: jint,
+) -> jboolean {
+    if index < 0 {
+        return 0;
+    }
+    engine(handle).select_layer_index(index as usize) as jboolean
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLayerNameAt(
+    env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    index: jint,
+) -> jni::sys::jstring {
+    if index < 0 {
+        return std::ptr::null_mut();
+    }
+    match engine(handle).layer_name(index as usize) {
+        Some(name) => match env.new_string(name) {
+            Ok(s) => s.as_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFitToContent(
     _env: JNIEnv,
     _class: JClass,

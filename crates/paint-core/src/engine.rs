@@ -190,6 +190,31 @@ impl Engine {
         r
     }
 
+    /// 图层数。
+    pub fn layer_count(&self) -> usize {
+        self.doc.layers().len()
+    }
+
+    /// 活动图层的栈位（0 = 底层）。
+    pub fn active_layer_index(&self) -> Option<usize> {
+        self.doc.layers().position(self.doc.layers().active())
+    }
+
+    /// 按栈位选择活动图层。
+    pub fn select_layer_index(&mut self, index: usize) -> bool {
+        let Some((id, _)) = self.doc.layers().iter_with_id().nth(index) else {
+            return false;
+        };
+        self.doc.layers_mut().set_active(id);
+        self.dirty = Dirty::All;
+        true
+    }
+
+    /// 按栈位取图层名。
+    pub fn layer_name(&self, index: usize) -> Option<&str> {
+        self.doc.layers().iter().nth(index).map(|l| l.name.as_str())
+    }
+
     /// 活动图层向下合并。底层无下层时失败。
     pub fn merge_down(&mut self) -> bool {
         let Some(active) = self.doc.layers().try_active() else {
