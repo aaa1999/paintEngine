@@ -90,8 +90,29 @@ fn stamp_tile(
             if d2 >= r2 {
                 continue;
             }
-            let t = d2.sqrt() / radius;
-            let a = falloff(t, hardness) * alpha * clip_v(clip, id, pxx, py);
+            // 纹理尖：alpha 蒙版来自尖图采样（散布偏移由 dab 坐标哈希确定）
+            let tip_a = dab.tip.as_ref().map(|tip| {
+                let ang = ((dab.x * 12.9898 + dab.y * 78.233).fract() * 43758.5453).fract();
+                let ox = (ang * 2.0 - 1.0) * dab.scatter as f64 * radius as f64;
+                let oy = ((ang * 917.3).fract() * 2.0 - 1.0) * dab.scatter as f64 * radius as f64;
+                let nx = (dx + ox) / radius.max(0.001) as f64 * 0.5 + 0.5;
+                let ny = (dy + oy) / radius.max(0.001) as f64 * 0.5 + 0.5;
+                let ts = tip.size as i64;
+                let tx = (nx * ts as f64) as i64;
+                let ty = (ny * ts as f64) as i64;
+                if tx < 0 || ty < 0 || tx >= ts || ty >= ts {
+                    0.0
+                } else {
+                    tip.sample(tx as u32, ty as u32)
+                }
+            });
+            let a = match tip_a {
+                Some(v) => v * alpha * clip_v(clip, id, pxx, py),
+                None => {
+                    let t = d2.sqrt() / radius;
+                    falloff(t, hardness) * alpha * clip_v(clip, id, pxx, py)
+                }
+            };
             if a <= 1.0 / 255.0 {
                 continue;
             }
@@ -191,6 +212,8 @@ mod tests {
             alpha: 1.0,
             mode,
             erase: false,
+            tip: None,
+            scatter: 0.0,
         }
     }
 
@@ -232,7 +255,7 @@ mod tests {
         };
         stamp_dabs(
             &mut layers.get_mut(lid).tiles,
-            &[half],
+            std::slice::from_ref(&half),
             None,
             &mut StrokeRecorder::new(lid),
         );
@@ -250,7 +273,7 @@ mod tests {
         };
         stamp_dabs(
             &mut layers2.get_mut(lid2).tiles,
-            &[wash],
+            std::slice::from_ref(&wash),
             None,
             &mut StrokeRecorder::new(lid2),
         );
@@ -332,6 +355,8 @@ mod tests {
         // 硬橡皮擦中心
         let eraser = Dab {
             erase: true,
+            tip: None,
+            scatter: 0.0,
             ..dab_at(50.0, 50.0, 4.0, DabMode::Buildup)
         };
         stamp_dabs(
@@ -344,5 +369,64 @@ mod tests {
         assert_eq!(c[3], 0, "中心应被完全擦除");
         // 预乘不变式：alpha 0 则 RGB 也为 0
         assert_eq!(&c[..3], &[0, 0, 0]);
+    }
+}
+
+#[cfg(test)]
+mod tip_stamp_tests {
+    use super::*;
+    use paint_core::color::Color;
+    use paint_core::layer::LayerStack;
+    use paint_core::stroke::{DabMode, TipTexture};
+    use paint_core::tile::TILE;
+    use std::sync::Arc;
+
+    #[test]
+    fn textured_dab_masks_by_tip() {
+        // 16×16 左半白右半黑尖图
+        let n = 16usize;
+        let mut rgba = vec![0u8; n * n * 4];
+        for y in 0..n {
+            for x in 0..n {
+                let v = if x < n / 2 { 255 } else { 0 };
+                let i = (y * n + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let png = paint_core::io::encode_png(&rgba, n as u32, n as u32).unwrap();
+        let tip = TipTexture::from_png(&png).unwrap();
+
+        let mut s = LayerStack::new();
+        let lid = s.insert(None);
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 8.0,
+            hardness: 1.0,
+            color: Color::BLACK,
+            alpha: 1.0,
+            mode: DabMode::Buildup,
+            erase: false,
+            tip: Some(Arc::new(tip)),
+            scatter: 0.0,
+        };
+        stamp_dabs(
+            &mut s.get_mut(lid).tiles,
+            &[dab],
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
+
+        let px = |x: usize, y: usize| -> u8 {
+            let t = s
+                .get(lid)
+                .tiles
+                .get(TileId::at(x as i64, y as i64))
+                .unwrap();
+            t.pixels()[(y * TILE as usize + x) * 4 + 3]
+        };
+        // dab 中心 (64,64) 半径 8：左半（60,64）有墨；右半（68,64）无
+        assert_eq!(px(60, 64), 255, "尖图白侧盖墨");
+        assert_eq!(px(68, 64), 0, "尖图黑侧不盖");
     }
 }

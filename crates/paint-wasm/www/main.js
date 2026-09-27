@@ -69,6 +69,19 @@ $("flatten").onclick = () => app.flatten();
 $("undo").onclick = () => app.undo();
 $("redo").onclick = () => app.redo();
 
+// 纹理笔刷尖
+$("tip").onclick = () => {
+  if (app._tipOn) { app.set_brush_tip(new Uint8Array(0)); app._tipOn = false; $("tip").classList.remove("active"); return; }
+  $("tipFile").click();
+};
+$("tipFile").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const data = new Uint8Array(await f.arrayBuffer());
+  if (app.set_brush_tip(data)) { app._tipOn = true; $("tip").classList.add("active"); $("status").textContent = `笔尖: ${f.name}`; }
+  e.target.value = "";
+};
+
 // 无限画布导航
 $("fit").onclick = () => app.fit_to_content();
 $("grid").onclick = () => {

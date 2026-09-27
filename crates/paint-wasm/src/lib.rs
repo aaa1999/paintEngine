@@ -112,6 +112,18 @@ impl PaintApp {
         self.inner.borrow_mut().engine.brush_mut().color = Color { r, g, b };
     }
 
+    /// 设置纹理笔刷尖（PNG 字节；空数组恢复圆头笔）。
+    pub fn set_brush_tip(&self, png: Vec<u8>) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let r = if png.is_empty() {
+            inner.engine.set_brush_tip(None)
+        } else {
+            inner.engine.set_brush_tip(Some(&png))
+        };
+        inner.needs_render.set(true);
+        r
+    }
+
     pub fn set_stabilizer(&self, v: f32) {
         self.inner.borrow_mut().engine.brush_mut().stabilizer = v.clamp(0.0, 0.98);
     }

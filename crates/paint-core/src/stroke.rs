@@ -11,8 +11,35 @@ pub enum DabMode {
     Wash,
 }
 
+/// 纹理笔刷尖：灰度图（0=不盖 255=全盖），最近邻采样。
+#[derive(Debug, Clone)]
+pub struct TipTexture {
+    pub data: Vec<u8>,
+    pub size: u32,
+}
+
+impl TipTexture {
+    /// 从 PNG 构造（取亮度）。
+    pub fn from_png(bytes: &[u8]) -> Option<Self> {
+        let (rgba, w, h) = crate::io::decode_png(bytes).ok()?;
+        if w == 0 || h == 0 || w != h {
+            return None;
+        }
+        let mut data = vec![0u8; (w * h) as usize];
+        for (d, px) in data.iter_mut().zip(rgba.as_chunks::<4>().0) {
+            *d = ((px[0] as u32 * 30 + px[1] as u32 * 59 + px[2] as u32 * 11) / 100) as u8;
+        }
+        Some(Self { data, size: w })
+    }
+
+    #[inline]
+    pub fn sample(&self, x: u32, y: u32) -> f32 {
+        self.data[(y * self.size + x) as usize] as f32 / 255.0
+    }
+}
+
 /// 一次印章。坐标为画布像素。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Dab {
     pub x: f64,
     pub y: f64,
@@ -25,6 +52,10 @@ pub struct Dab {
     pub mode: DabMode,
     /// true = dst-out（橡皮擦），忽略 color/mode。
     pub erase: bool,
+    /// 纹理笔刷尖（Some 时 alpha 蒙版来自尖图采样，取代径向曲线）。
+    pub tip: Option<std::sync::Arc<TipTexture>>,
+    /// 尖图随机散布强度 0..1（相对半径的比例偏移，dab 坐标哈希定种子）。
+    pub scatter: f32,
 }
 
 /// 一笔的进行时状态（平滑位置、间距游标）。
@@ -88,6 +119,10 @@ pub struct RoundBrush {
     pub pressure_gamma: f32,
     pub color: Color,
     pub mode: DabMode,
+    /// 纹理笔刷尖。
+    pub tip: Option<std::sync::Arc<TipTexture>>,
+    /// 尖图散布强度 0..1。
+    pub scatter: f32,
 }
 
 impl Default for RoundBrush {
@@ -103,6 +138,8 @@ impl Default for RoundBrush {
             pressure_gamma: 1.0,
             color: Color::BLACK,
             mode: DabMode::Buildup,
+            tip: None,
+            scatter: 0.0,
         }
     }
 }
@@ -135,6 +172,8 @@ impl RoundBrush {
             alpha: self.dab_alpha(),
             mode: self.mode,
             erase: false,
+            tip: self.tip.clone(),
+            scatter: self.scatter,
         }
     }
 }
@@ -364,5 +403,54 @@ mod stabilizer_tests {
             "终点应补到原始样本: {}",
             last.x
         );
+    }
+}
+
+#[cfg(test)]
+mod tip_tests {
+    use super::*;
+    use crate::input::PointerKind;
+    use std::sync::Arc;
+
+    #[test]
+    fn tip_from_png_and_stamp() {
+        // 8×8 左半白右半黑的尖图
+        let mut rgba = vec![0u8; 8 * 8 * 4];
+        for y in 0..8 {
+            for x in 0..8 {
+                let v = if x < 4 { 255 } else { 0 };
+                let i = (y * 8 + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let png = crate::io::encode_png(&rgba, 8, 8).unwrap();
+        let tip = TipTexture::from_png(&png).unwrap();
+        assert_eq!(tip.size, 8);
+        assert_eq!(tip.sample(0, 0), 1.0);
+        assert_eq!(tip.sample(7, 0), 0.0);
+
+        // 盖章：中心 dab 半径 8 → 左半有墨右半无
+        let brush = RoundBrush {
+            size: 16.0,
+            smoothing: 0.0,
+            tip: Some(Arc::new(tip)),
+            ..RoundBrush::default()
+        };
+        let sample = PointerSample {
+            x: 32.0,
+            y: 32.0,
+            pressure: Some(1.0),
+            tilt: None,
+            kind: PointerKind::Pen,
+            id: 0,
+            t_us: 0,
+        };
+        let mut st = StrokeState::new(32.0, 32.0, 8.0);
+        let dabs = StrokeGen::begin(&brush, &mut st, &sample);
+        assert_eq!(dabs.len(), 1);
+        let d = &dabs[0];
+        assert!(d.tip.is_some());
+        // 蒙版值：dab 左侧 (x < 32) 应有非零 alpha，右侧无
+        // （真正的像素验证在 paint-render 侧；这里验证 dab 携带 tip）
     }
 }

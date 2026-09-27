@@ -116,6 +116,28 @@ impl Engine {
         &mut self.brush
     }
 
+    /// 设置纹理笔刷尖（PNG 字节；None 恢复圆头笔）。
+    pub fn set_brush_tip(&mut self, png: Option<&[u8]>) -> bool {
+        match png {
+            Some(bytes) => match crate::stroke::TipTexture::from_png(bytes) {
+                Some(tip) => {
+                    self.brush.tip = Some(std::sync::Arc::new(tip));
+                    true
+                }
+                None => false,
+            },
+            None => {
+                self.brush.tip = None;
+                true
+            }
+        }
+    }
+
+    /// 尖图散布强度 0..1。
+    pub fn set_brush_scatter(&mut self, v: f32) {
+        self.brush.scatter = v.clamp(0.0, 1.0);
+    }
+
     pub fn tool(&self) -> Tool {
         self.tool
     }

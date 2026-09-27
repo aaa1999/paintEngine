@@ -78,6 +78,8 @@ mod tests {
             alpha: 1.0,
             mode: DabMode::Buildup,
             erase: false,
+            tip: None,
+            scatter: 0.0,
         }];
         let l = layers.get_mut(id);
         super::super::stamp::stamp_dabs(&mut l.tiles, &dabs, None, &mut StrokeRecorder::new(id));

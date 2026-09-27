@@ -20,6 +20,8 @@ fn dab(x: f64, y: f64, r: f32, color: Color, alpha: f32) -> Dab {
         alpha,
         mode: DabMode::Buildup,
         erase: false,
+        tip: None,
+        scatter: 0.0,
     }
 }
 
