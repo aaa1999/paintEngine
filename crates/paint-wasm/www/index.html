@@ -6,7 +6,11 @@
   <title>paintEngine — Web</title>
   <style>
     html, body { margin: 0; height: 100%; overflow: hidden; font: 13px system-ui, sans-serif; }
-    #toolbar {
+    #tabBar { display: flex; gap: 2px; padding: 4px 8px; background: #222; border-bottom: 1px solid #444; overflow-x: auto; }
+  #tabBar .tab { padding: 3px 10px; border-radius: 4px 4px 0 0; cursor: pointer; font: 12px system-ui; color: #aaa; white-space: nowrap; }
+  #tabBar .tab.active { background: #2a2a2e; color: #fff; }
+  #tabBar .tab .close { margin-left: 6px; color: #666; }
+  #toolbar {
       display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
       padding: 8px; background: #f3f3f3; border-bottom: 1px solid #ddd;
     }

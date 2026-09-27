@@ -27,7 +27,7 @@
 - [x] **图层组（轻量 MVP）** — Layer.group 标签分组 + 批量可见性切换 + Web 面板缩进显示；不做嵌套合成（组内层独立合成）。
 - [x] **桌面可视面板** — 呈现拦截架构（引擎 Resize 传减面板宽，App 侧引擎帧+面板拼接为全宽帧呈现）；swash 光栅化文字（系统 Helvetica，零资源依赖）；图层行（●眼切标记/层名含蒙版剪贴后缀/透明度条/活动高亮）+ 底部快捷键提示；Hit 命中测试框架（点击选层/眼切，后续接线）。
 - [x] **Wasm 瘦身** — 三档产物（`./build-wasm.sh all`）：slim **837KB**（无 SVG/文字，-62%）/ full **2.1MB**（全功能）/ gpu **2.2MB**（+GPU）；opt-level=z + fat LTO + strip + codegen-units=1；paint-core 的 svg/text 改 optional 并在中间 crate 关闭 default-features 传播。
-- [ ] **多文档** — Engine 支持多 Document 实例切换（标签页）。
+- [x] **多文档** — Engine swap_document/document_take/new_document（Document 携带全部状态：图层/撤销/选区/浮动，切换零丢失）；桌面 Ctrl+N 新建 / Ctrl+W 关闭 + swash 标签栏绘制；Web 标签栏 UI（点击切换/＋新建）。
 
 ## 🏗️ 大工程（一周+）
 

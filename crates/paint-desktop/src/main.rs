@@ -112,6 +112,9 @@ struct App {
     /// 按需重绘：任何输入/焦点/尺寸事件置位，画完即清。
     needs_redraw: bool,
     layer_panel: panel::Panel,
+    /// 多文档：后台文档池（当前文档在 engine 内）。
+    docs: Vec<(String, paint_core::Document)>,
+    doc_counter: u32,
 }
 
 impl App {
@@ -142,6 +145,8 @@ impl App {
             tool_before_erase: None,
             layer_panel: panel::Panel::new(),
             needs_redraw: true,
+            docs: Vec::new(),
+            doc_counter: 1,
         }
     }
 
@@ -294,6 +299,55 @@ impl App {
         }
     }
 
+    /// 新建文档标签（当前文档入池）。
+    fn doc_new(&mut self) {
+        let cur = self.engine.document_take();
+        self.docs.push((format!("画布 {}", self.doc_counter), cur));
+        self.doc_counter += 1;
+        self.engine.new_document();
+        println!("新建文档（共 {} 个）", self.docs.len() + 1);
+    }
+
+    /// 切换到池中文档。
+    #[allow(dead_code)]
+    fn doc_switch(&mut self, idx: usize) {
+        if idx >= self.docs.len() {
+            return;
+        }
+        let cur = self.engine.document_take();
+        let (name, doc) = self.docs.remove(idx);
+        self.docs.push(("当前".into(), cur));
+        // 换入
+        let old = self.engine.swap_document(doc);
+        // old 是 document_take 创建的空文档——丢弃，恢复真实当前名
+        drop(old);
+        // 名字放最前（栈顶为当前标签位——简化：docs 尾部即当前前的位置）
+        let n = self.docs.len();
+        self.docs[n - 1].0 = name.clone();
+        println!("切换到 {name}");
+    }
+
+    /// 关闭当前文档（丢弃，回到池中最后一个；池空则新建）。
+    fn doc_close(&mut self) {
+        if let Some((name, doc)) = self.docs.pop() {
+            let old = self.engine.swap_document(doc);
+            drop(old);
+            println!("关闭文档，切回 {name}");
+        } else {
+            self.engine.new_document();
+            println!("关闭最后一个文档，已新建");
+        }
+    }
+
+    /// 全部标签名（当前文档为最后一项）。
+    fn doc_names(&self) -> Vec<String> {
+        self.docs
+            .iter()
+            .map(|(n, _)| n.clone())
+            .chain(std::iter::once("当前".to_string()))
+            .collect()
+    }
+
     fn panel_x0(&self) -> i32 {
         self.window
             .as_ref()
@@ -425,15 +479,15 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let Some(sb) = self.surface.as_mut() else {
-            return;
-        };
         let size = window.inner_size();
         let (win_w, win_h) = (size.width, size.height);
         let engine_size = self.engine.frame_size();
 
-        // 1) 引擎渲染画布帧
+        // 1) 引擎渲染画布帧（借 sb 段 1）
         {
+            let Some(sb) = self.surface.as_mut() else {
+                return;
+            };
             let mut target = SoftbufferTarget {
                 sb,
                 w: engine_size.0,
@@ -442,42 +496,42 @@ impl App {
             self.engine.render(&mut target);
         }
 
-        // 2) 拼接面板帧 + 全宽呈现
-        if win_w > engine_size.0 {
-            // 面板画到临时全宽帧
-            let mut full_frame = vec![38u8; (win_w * win_h * 4) as usize];
-            // 拷贝引擎帧
+        // 2) 拼 UI 帧（纯 self 读写，无 sb）
+        let present_frame: Vec<u8> = if win_w > engine_size.0 {
+            let names = self.doc_names();
+            let active = names.len() - 1;
+            let mut full = vec![38u8; (win_w * win_h * 4) as usize];
             if let Some(ef) = self.engine.frame_mut() {
                 for y in 0..engine_size.1.min(win_h) {
-                    let src_row = (y * engine_size.0 * 4) as usize;
-                    let dst_row = (y * win_w * 4) as usize;
-                    let copy_len = (engine_size.0 * 4) as usize;
-                    full_frame[dst_row..dst_row + copy_len]
-                        .copy_from_slice(&ef[src_row..src_row + copy_len]);
+                    let src = (y * engine_size.0 * 4) as usize;
+                    let dst = (y * win_w * 4) as usize;
+                    let len = (engine_size.0 * 4) as usize;
+                    full[dst..dst + len].copy_from_slice(&ef[src..src + len]);
                 }
             }
-            // 画面板（写 full_frame 右侧）
             self.layer_panel
-                .draw(&self.engine, &mut full_frame, win_w, win_h);
+                .draw_tabs(&mut full, win_w, win_h, &names, active);
+            self.layer_panel.draw(&self.engine, &mut full, win_w, win_h);
+            full
+        } else {
+            Vec::new()
+        };
 
-            // 呈现全宽帧
-            let Ok(mut buffer) = sb.buffer_mut() else {
+        // 3) 呈现（借 sb 段 2）
+        {
+            let Some(sb) = self.surface.as_mut() else {
                 return;
             };
-            for (dst, src) in buffer.iter_mut().zip(full_frame.as_chunks::<4>().0) {
-                *dst = u32::from_le_bytes(*src);
+            if !present_frame.is_empty() {
+                if let Ok(mut buffer) = sb.buffer_mut() {
+                    for (dst, src) in buffer.iter_mut().zip(present_frame.as_chunks::<4>().0) {
+                        *dst = u32::from_le_bytes(*src);
+                    }
+                    let _ = buffer.present();
+                }
+            } else {
+                // 窄窗：引擎帧已由段 1 呈现
             }
-            let _ = buffer.present();
-        } else {
-            // 无面板空间：直接呈现引擎帧
-            let mut target = SoftbufferTarget {
-                sb,
-                w: engine_size.0,
-                h: engine_size.1,
-            };
-            // engine.render 已在上方完成——但 present 由 SoftbufferTarget
-            // 内部处理；此处只需再次触发（帧未变则 skip 合成）
-            self.engine.render(&mut target);
         }
         self.needs_redraw = false;
     }
@@ -873,6 +927,12 @@ impl ApplicationHandler for App {
                             }
                             "v" | "V" if ctrl => {
                                 self.paste_from_clipboard();
+                            }
+                            "n" | "N" if ctrl && !shift => {
+                                self.doc_new();
+                            }
+                            "w" | "W" if ctrl => {
+                                self.doc_close();
                             }
                             "t" | "T" if ctrl => {
                                 if self.engine.transforming() {

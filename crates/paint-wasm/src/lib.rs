@@ -33,6 +33,7 @@ type KeyClosure = Closure<dyn FnMut(web_sys::KeyboardEvent)>;
 
 struct Inner {
     engine: Engine,
+    doc_pool: Vec<(String, paint_core::Document)>,
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
     needs_render: Cell<bool>,
@@ -83,6 +84,7 @@ impl PaintApp {
         let engine = Engine::new(renderer, EngineConfig::default());
         let inner = Rc::new(RefCell::new(Inner {
             engine,
+            doc_pool: Vec::new(),
             canvas: canvas.clone(),
             ctx,
             needs_render: Cell::new(true),
@@ -487,6 +489,50 @@ impl PaintApp {
                 contrast,
             })
         })
+    }
+
+    /// 多文档：新建标签（当前入池）。
+    pub fn doc_new(&self) -> usize {
+        let mut inner = self.inner.borrow_mut();
+        let cur = inner.engine.document_take();
+        // Web 端文档池挂在 engine 外——简化：由 JS 侧存 Document 不可行（无类型）。
+        // 方案：paint-wasm 自持文档池。
+        let label = format!("画布 {}", inner.doc_pool.len() + 2);
+        inner.doc_pool.push((label, cur));
+        inner.engine.new_document();
+        inner.needs_render.set(true);
+        inner.doc_pool.len() + 1
+    }
+
+    pub fn doc_count(&self) -> usize {
+        let inner = self.inner.borrow();
+        inner.doc_pool.len() + 1
+    }
+
+    pub fn doc_name(&self, idx: usize) -> String {
+        let inner = self.inner.borrow();
+        if idx < inner.doc_pool.len() {
+            inner.doc_pool[idx].0.clone()
+        } else {
+            "当前".into()
+        }
+    }
+
+    /// 切换到池中文档 idx。
+    pub fn doc_switch(&self, idx: usize) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        if idx >= inner.doc_pool.len() {
+            return false;
+        }
+        let cur = inner.engine.document_take();
+        let (name, doc) = inner.doc_pool.remove(idx);
+        inner.doc_pool.push(("当前".into(), cur));
+        let old = inner.engine.swap_document(doc);
+        drop(old);
+        let n = inner.doc_pool.len();
+        inner.doc_pool[n - 1].0 = name;
+        inner.needs_render.set(true);
+        true
     }
 
     pub fn toggle_layer_mask(&self) -> bool {

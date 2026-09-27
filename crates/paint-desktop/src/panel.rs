@@ -10,6 +10,8 @@ pub const PANEL_W: u32 = 200;
 pub const TITLE_H: u32 = 32;
 pub const ROW_H: u32 = 30;
 pub const HINT_H: u32 = 44;
+pub const TAB_H: u32 = 28;
+pub const TAB_W: u32 = 110;
 
 /// 面板命中区域。
 #[allow(dead_code)]
@@ -71,6 +73,71 @@ impl Panel {
             return Hit::Hint;
         }
         Hit::Outside
+    }
+
+    /// 绘制标签栏（画布区域顶部）。返回标签栏高度（0 = 不画）。
+    pub fn draw_tabs(
+        &self,
+        frame: &mut [u8],
+        frame_w: u32,
+        frame_h: u32,
+        names: &[String],
+        active: usize,
+    ) {
+        if frame_w < 200 || frame_h < TAB_H + 50 || names.is_empty() {
+            return;
+        }
+        // 背景
+        fill_rect(frame, frame_w, 0, 0, frame_w, TAB_H, [34, 34, 38, 255]);
+        // 标签
+        for (i, name) in names.iter().enumerate() {
+            let x = i as u32 * TAB_W;
+            if x + TAB_W > frame_w {
+                break;
+            }
+            let is_active = i == active;
+            let bg = if is_active {
+                [55, 90, 160, 255]
+            } else {
+                [42, 42, 46, 255]
+            };
+            fill_rect(frame, frame_w, x + 2, 3, TAB_W - 4, TAB_H - 4, bg);
+            let col = if is_active {
+                [255, 255, 255, 255]
+            } else {
+                [160, 160, 168, 255]
+            };
+            // 截断长名
+            let display: String = name.chars().take(8).collect();
+            self.draw_text(frame, frame_w, x + 10, 7, &display, col, 11.0);
+            // 关闭 ×
+            if names.len() > 1 {
+                self.draw_text(
+                    frame,
+                    frame_w,
+                    x + TAB_W - 18,
+                    7,
+                    "×",
+                    [200, 200, 200, 255],
+                    11.0,
+                );
+            }
+        }
+        // + 新建（最右）
+        let plus_x = (names.len() as u32) * TAB_W;
+        if plus_x + 30 < frame_w {
+            self.draw_text(
+                frame,
+                frame_w,
+                plus_x + 8,
+                7,
+                "+",
+                [160, 160, 168, 255],
+                12.0,
+            );
+        }
+        // 分隔线
+        fill_rect(frame, frame_w, 0, TAB_H - 1, frame_w, 1, [60, 60, 66, 255]);
     }
 
     /// 绘制面板到帧缓冲（RGBA8 预乘行主序，帧宽 = frame_w）。

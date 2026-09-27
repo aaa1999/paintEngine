@@ -397,6 +397,34 @@ impl Engine {
         self.tool = tool;
     }
 
+    // ── 多文档 ──
+
+    /// 换出当前文档（保留在调用方），换入另一个。
+    /// 撤销历史/图层/选区/浮动层都在 Document 内——切换零丢失。
+    pub fn swap_document(&mut self, doc: Document) -> Document {
+        self.end_stroke();
+        let old = std::mem::replace(&mut self.doc, doc);
+        self.dirty = Dirty::All;
+        old
+    }
+
+    /// 复制当前文档（新文档 = 深拷贝图层栈引用 + 空历史）。
+    pub fn duplicate_document(&mut self) -> Document {
+        Document::with_layers(self.doc.layers().clone())
+    }
+
+    /// 新建空文档（一个默认图层）。
+    pub fn new_document(&mut self) {
+        self.end_stroke();
+        self.doc = Document::new(256 * 1024 * 1024);
+        self.dirty = Dirty::All;
+    }
+
+    /// 当前文档的可变引用（壳层多文档管理器直接操作用）。
+    pub fn document_take(&mut self) -> Document {
+        std::mem::replace(&mut self.doc, Document::new(1))
+    }
+
     /// 合成帧缓冲的可变访问（呈现前叠加 UI 用）。
     pub fn frame_mut(&mut self) -> Option<&mut [u8]> {
         if self.frame.is_empty() {

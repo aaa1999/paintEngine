@@ -152,6 +152,27 @@ $("fxInvert").onclick = () => { if (app.apply_invert()) $("status").textContent 
 $("fxGray").onclick = () => { if (app.apply_grayscale()) $("status").textContent = "已灰度"; };
 $("fxBlur").onclick = () => { if (app.apply_blur(8)) $("status").textContent = "已模糊 r=8"; };
 
+// 多文档标签栏
+function refreshTabs() {
+  const bar = document.getElementById("tabBar");
+  bar.innerHTML = "";
+  const n = app.doc_count();
+  for (let i = 0; i < n; i++) {
+    const name = i === n - 1 ? "当前" : app.doc_name(i);
+    const tab = document.createElement("span");
+    tab.className = "tab" + (i === n - 1 ? " active" : "");
+    tab.textContent = name;
+    tab.onclick = () => { if (i < n - 1) { app.doc_switch(i); refreshTabs(); refreshLayers(); } };
+    bar.appendChild(tab);
+  }
+  const plus = document.createElement("span");
+  plus.className = "tab";
+  plus.textContent = "＋";
+  plus.onclick = () => { app.doc_new(); refreshTabs(); refreshLayers(); };
+  bar.appendChild(plus);
+}
+refreshTabs();
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {
