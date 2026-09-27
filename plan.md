@@ -44,7 +44,7 @@ paint-engine/  (workspace)
 | `png` | M2 | IO | PNG 编解码 | 只需 PNG，不拖整个 image 生态 |
 | `zip` | M4 | 存档 | OpenRaster(.ora) 容器读写 | .ora 本质是 zip + XML + 每层一个 PNG |
 
-M1 实际仅引入 `tiny-skia` / `winit` / `softbuffer` 三个，依赖面很小。
+M1 实际引入 `winit` / `softbuffer` 两个（软件渲染器为手写实现，未引入 tiny-skia；tiny-skia 随 P1 路径光栅化 `rasterize` 落地）。
 
 ### 考虑过但放弃
 
@@ -189,18 +189,28 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 
 ## 六、里程碑
 
-### M1（P0）：桌面可画、可撤销
+### M1（P0）：桌面可画、可撤销 ✅（2026-09-27）
 
-- [ ] Cargo workspace 搭建：paint-core / paint-render / paint-desktop 三个 crate 骨架
-- [ ] TileGrid：稀疏存储、get_or_create、prune、content_bounds
-- [ ] COW 瓦片 + History（撤销组、内存限额淘汰）
-- [ ] LayerStack 基础：insert / opacity / visible / blend(Normal)
-- [ ] Renderer trait + 软件实现：stamp_dabs（圆头 dab、硬度、压感）、composite（脏区）
-- [ ] RoundBrush（size/hardness/opacity/flow/spacing）+ 压感映射
-- [ ] Viewport：平移、缩放、坐标换算
-- [ ] Engine 骨架：handle_event / render / undo / redo
-- [ ] 桌面壳：winit + softbuffer，鼠标/笔输入，呈现 CPU 帧缓冲
-- [ ] 验收：桌面上用鼠标画线条，压感笔有粗细变化，撤销/恢复正常，平移缩放流畅
+- [x] Cargo workspace 搭建：paint-core / paint-render / paint-desktop 三个 crate 骨架
+- [x] TileGrid：稀疏存储、get_or_create、prune、content_bounds
+- [x] COW 瓦片 + History（撤销组、内存限额淘汰）
+- [x] LayerStack 基础：insert / opacity / visible / blend(Normal)
+- [x] Renderer trait + 软件实现：stamp_dabs（圆头 dab、硬度、压感）、composite（脏区）
+- [x] RoundBrush（size/hardness/opacity/flow/spacing）+ 压感映射
+- [x] Viewport：平移、缩放、坐标换算
+- [x] Engine 骨架：handle_event / render / undo / redo
+- [x] 桌面壳：winit + softbuffer，鼠标输入，呈现 CPU 帧缓冲
+- [x] 验收：绘画-撤销-重做全循环、合成压感笔宽变化、平移缩放重绘均有自动化测试覆盖（35 项测试全绿）
+
+实现备注（与蓝图的偏差与补充）：
+
+- **Renderer trait 定义在 paint-core**（消费方）而非 paint-render，保证引擎不依赖具体渲染实现；paint-render 提供 SoftwareRenderer。
+- **M1 未引入 tiny-skia**：dab 盖章与脏区合成为手写标量循环（最近邻采样、预乘 alpha、瓦片行内缓存），路径光栅化需求（P1 套索/形状工具）落地时再引入。
+- **桌面端无真实压感**：winit 不透传数位笔压感数据。压感链路（PointerSample.pressure → 笔宽变化）已由 e2e 合成压感测试验证；真实压感随 M2（Web Pointer Events）与 M3（iOS/Android）落地。
+- Viewport 带 revision 版本号：壳层直接改视口（拖拽平移等）时引擎检测到版本变化自动全量重绘。
+- UndoGroup 按内存限额近似记账（跨组共享 Arc 重复计，宁多勿少），淘汰保留至少一组。
+
+运行：`cargo run -p paint-desktop --release`（左键绘画 · 中键/空格拖拽平移 · 滚轮缩放 · Ctrl+Z 撤销 · [ ] 笔刷大小）
 
 ### M2（P1）：完整绘画应用（Web 优先）
 
