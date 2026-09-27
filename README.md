@@ -1,4 +1,4 @@
-# paintEngine
+# paintEngine | [English](README.en.md)
 
 跨平台绘画引擎内核，纯 Rust 实现。核心是**无限平铺画布**——稀疏瓦片存储、写时复制撤销、压感笔画光栅化与脏区合成——同一份引擎核心嵌入桌面、浏览器与 Android 原生应用。
 
