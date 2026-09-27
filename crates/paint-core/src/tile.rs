@@ -97,6 +97,11 @@ impl TileGrid {
         self.tiles.len()
     }
 
+    /// 瓦片内存占用（字节；共享 Arc 可能重复计——上限估计）。
+    pub fn memory_bytes(&self) -> usize {
+        self.tiles.len() * TILE_BYTES
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }

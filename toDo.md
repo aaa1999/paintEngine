@@ -39,9 +39,9 @@
 
 ## ⚠️ 工程健康（不紧急但迟早要做）
 
-- [ ] **错误恢复** — 多处 unwrap/expect；输入异常时可能 panic。需统一错误处理 + 优雅降级。
-- [ ] **内存监控** — 无瓦片内存实时可视；大画布可能 OOM 无预警。加 tile 内存计数器 + 阈值告警。
-- [ ] **边界测试** — 1px 画布 / 极端缩放 / 空图层 / 单色图层 / 最大瓦片数等 edge case 覆盖。
+- [x] **错误恢复** — 3 处显式 panic 消除（unreachable→防御兜底/panic→清晰断言）；engine/history/layer 非测试 unwrap 全清理（let-else/total_cmp/Option 链）；LayerStack 补 try_get。
+- [x] **内存监控** — TileGrid::memory_bytes + Document::tile_memory_bytes/total_memory_bytes + Engine::memory_report()（瓦片/撤销/总计三元组）。
+- [x] **边界测试** — 7 项永久回归：1×1 画布+200px 笔刷 / 极端缩放循环 / 空图层栈全操作 / 变换中换文档 / 1e12 超大平移 / 畸形输入矩阵（ORA/PNG/JPEG/WebP/SVG 各变体）/ 内存报告健全性。
 - [ ] **文字编辑** — 只能插入不能修改已有文字。需文字对象持久化 + 光标编辑。
 - [ ] **形状持久化** — 形状立即栅格化，无矢量对象保留。SVG 导出依赖此项。
 - [ ] **API 文档** — rustdoc 覆盖不完整；补全公共接口文档 + 使用示例。

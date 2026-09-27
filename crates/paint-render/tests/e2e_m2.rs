@@ -686,3 +686,147 @@ fn canvas_export_uses_canvas_bounds() {
     let (_, w, h) = paint_core::io::decode_png(&png).unwrap();
     assert_eq!((w, h), (40, 50), "导出应等于画布尺寸");
 }
+
+// ═══ 边界与健壮性回归测试 ═══
+
+#[test]
+fn boundary_tiny_canvas_giant_brush() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 1,
+        h: 1,
+        scale: 1.0,
+    });
+    e.brush_mut().size = 200.0;
+    e.handle_event(PlatformEvent::Pointer {
+        phase: PointerPhase::Down,
+        sample: PointerSample::mouse(0.5, 0.5),
+    });
+    e.handle_event(PlatformEvent::Pointer {
+        phase: PointerPhase::Up,
+        sample: PointerSample::mouse(0.5, 0.5),
+    });
+    e.render(&mut s);
+    // 无 panic 即通过
+}
+
+#[test]
+fn boundary_extreme_zoom_cycle() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 100,
+        h: 100,
+        scale: 1.0,
+    });
+    e.document_mut().viewport_mut().set_zoom(64.0);
+    draw(&mut e, 10.0, 40.0, 50.0);
+    e.document_mut().viewport_mut().set_zoom(1.0 / 32.0);
+    e.render(&mut s);
+    e.document_mut().viewport_mut().set_zoom(1.0);
+    e.render(&mut s);
+}
+
+#[test]
+fn boundary_empty_layer_stack_operations() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 50,
+        h: 50,
+        scale: 1.0,
+    });
+    let lid = e.document().active_layer();
+    e.remove_layer(lid);
+    // 空栈上各种操作不 panic
+    e.handle_event(PlatformEvent::Pointer {
+        phase: PointerPhase::Down,
+        sample: PointerSample::mouse(10.0, 10.0),
+    });
+    e.undo();
+    e.begin_transform(); // 应失败不 panic
+    let _ = e.apply_filter(paint_core::Filter::Invert);
+    e.render(&mut s);
+}
+
+#[test]
+fn boundary_transform_then_new_document() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 50,
+        h: 50,
+        scale: 1.0,
+    });
+    e.brush_mut().smoothing = 0.0;
+    draw(&mut e, 10.0, 30.0, 30.0);
+    assert!(e.begin_transform());
+    e.transform_rotate(1.0);
+    e.new_document(); // 变换中换文档——浮动层应被丢弃
+    assert!(!e.transforming());
+    e.render(&mut s);
+}
+
+#[test]
+fn boundary_huge_pan_coordinates() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 50,
+        h: 50,
+        scale: 1.0,
+    });
+    e.document_mut().viewport_mut().pan_by(-1e12, -1e12);
+    e.handle_event(PlatformEvent::Pointer {
+        phase: PointerPhase::Down,
+        sample: PointerSample::mouse(25.0, 25.0),
+    });
+    e.handle_event(PlatformEvent::Pointer {
+        phase: PointerPhase::Up,
+        sample: PointerSample::mouse(25.0, 25.0),
+    });
+    e.document_mut().viewport_mut().pan_by(1e12, 1e12);
+    e.render(&mut s);
+}
+
+#[test]
+fn boundary_malformed_inputs_matrix() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 50,
+        h: 50,
+        scale: 1.0,
+    });
+
+    // 畸形 ORA 变体
+    assert!(!e.load_ora(b""));
+    assert!(!e.load_ora(b"PK\x03\x04junk"));
+    assert!(!e.load_ora(&[0u8; 1000]));
+
+    // 畸形图像
+    assert!(e.import_image(b"").is_none());
+    assert!(e.import_image(b"\x89PNG\r\n\x1a\ntruncated").is_none());
+    assert!(e.import_image(&[0xFF, 0xD8, 0xFF]).is_none()); // JPEG 魔数但无体
+    assert!(e.import_image(b"RIFF0000WEBPjunk").is_none());
+
+    // 畸形 SVG
+    assert!(e.import_svg(b"<svg>", 1.0).is_none());
+    assert!(e.import_svg(b"<svg width='0' height='0'/>", 1.0).is_none());
+    assert!(e.import_svg(b"not xml at all", 1.0).is_none());
+
+    e.render(&mut s);
+}
+
+#[test]
+fn boundary_memory_report_sane() {
+    let (mut e, mut s) = engine();
+    e.handle_event(PlatformEvent::Resize {
+        w: 100,
+        h: 100,
+        scale: 1.0,
+    });
+    e.brush_mut().smoothing = 0.0;
+    e.brush_mut().size = 50.0;
+    draw(&mut e, 10.0, 90.0, 50.0);
+    e.render(&mut s);
+    let (tiles, undo, total) = e.memory_report();
+    assert!(tiles > 0, "有瓦片");
+    // undo 记账为近似值（Arc 共享去重前），非负即可
+    assert_eq!(total, tiles + undo);
+}

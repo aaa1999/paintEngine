@@ -178,6 +178,9 @@ pub fn composite(
                 };
                 let p = tile.pixels();
                 let d = row + x as usize * 4;
+                if d + 3 >= target.len() {
+                    continue; // 旋转路径下 x/y 可能越出帧（安全兜底）
+                }
 
                 // 蒙版（1:1 最近邻）：有效 alpha ×= mask.R
                 let mask_mul: f32 = if let Some(mask) = &layer.mask {

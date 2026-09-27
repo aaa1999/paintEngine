@@ -353,12 +353,16 @@ impl LayerStack {
     }
 
     pub fn get(&self, id: LayerId) -> &Layer {
-        &self.entries[self.position(id).expect("图层不存在")].layer
+        self.try_get(id).expect("图层不存在（调用方保证）")
+    }
+
+    /// 不存在返回 None。
+    pub fn try_get(&self, id: LayerId) -> Option<&Layer> {
+        self.position(id).map(|p| &self.entries[p].layer)
     }
 
     pub fn get_mut(&mut self, id: LayerId) -> &mut Layer {
-        let p = self.position(id).expect("图层不存在");
-        &mut self.entries[p].layer
+        self.try_get_mut(id).expect("图层不存在（调用方保证）")
     }
 
     /// 图层可能已被删除的场合（撤销组回放等）。
@@ -372,7 +376,8 @@ impl LayerStack {
     }
 
     pub fn active(&self) -> LayerId {
-        self.active.expect("空图层栈没有活动图层")
+        self.active
+            .expect("空图层栈没有活动图层（调用方应先 try_active）")
     }
 
     pub fn try_active(&self) -> Option<LayerId> {

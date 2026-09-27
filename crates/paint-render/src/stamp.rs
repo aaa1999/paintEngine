@@ -35,10 +35,12 @@ fn stamp_dab(
 ) {
     let r = dab.radius.max(0.0) as f64;
     let ri = r.ceil() as i64;
-    let x0 = dab.x as i64 - ri;
-    let y0 = dab.y as i64 - ri;
-    let x1 = dab.x as i64 + ri;
-    let y1 = dab.y as i64 + ri;
+    // 溢出守卫：钳制瓦片枚举范围到 i32 瓦片坐标域（±2^23 瓦片 ≈ ±5亿像素）
+    let lim = 1 << 23;
+    let x0 = (dab.x as i64 - ri).clamp(-lim, lim);
+    let y0 = (dab.y as i64 - ri).clamp(-lim, lim);
+    let x1 = (dab.x as i64 + ri).clamp(-lim, lim);
+    let y1 = (dab.y as i64 + ri).clamp(-lim, lim);
 
     for ty in y0 >> 8..=y1 >> 8 {
         for tx in x0 >> 8..=x1 >> 8 {
@@ -348,7 +350,7 @@ mod tests {
         let group = rec.finish("Stroke");
         let tiles = match group.ops.first() {
             Some(UndoOp::Tiles(v)) => v,
-            _ => panic!("应是瓦片操作"),
+            _ => unreachable!("UndoGroup 首操作应为瓦片"),
         };
         assert_eq!(tiles.len(), 4, "四个瓦片都记录了旧快照");
         assert!(tiles.iter().all(|(_, _, old)| old.is_none()));
@@ -375,7 +377,7 @@ mod tests {
         let group = rec.finish("Stroke");
         let tiles = match group.ops.first() {
             Some(UndoOp::Tiles(v)) => v,
-            _ => panic!("应是瓦片操作"),
+            _ => unreachable!("UndoGroup 首操作应为瓦片"),
         };
         assert!(tiles.iter().all(|(_, _, old)| old.is_some()));
     }

@@ -6,3 +6,6 @@ edition.workspace = true
 
 [dependencies]
 paint-core = { path = "../paint-core", default-features = false }
+
+[dev-dependencies]
+paint-core = { path = "../paint-core", features = ["svg"] }

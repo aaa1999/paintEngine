@@ -234,6 +234,13 @@ impl Engine {
         &self.doc
     }
 
+    /// 内存概况（瓦片/撤销/总计，字节）。
+    pub fn memory_report(&self) -> (usize, usize, usize) {
+        let tiles = self.doc.tile_memory_bytes();
+        let undo = self.doc.history().memory_used();
+        (tiles, undo, tiles + undo)
+    }
+
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.doc
     }
@@ -800,7 +807,7 @@ impl Engine {
         let mut rgba = vec![0u8; w * h * 4];
         for id in grid.ids() {
             let (ox, oy) = id.origin();
-            let t = grid.get(id).unwrap();
+            let Some(t) = grid.get(id) else { continue };
             for row in 0..TILE as i64 {
                 let gy = oy + row;
                 if gy < bbox.y as i64 || gy >= bbox.y2() {
@@ -1237,7 +1244,7 @@ impl Engine {
                         xs.push(ax + t * (bx - ax));
                     }
                 }
-                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs.sort_by(|a, b| a.total_cmp(b));
                 let it = xs.chunks(2);
                 for pair in it {
                     if pair.len() == 2 {
@@ -1462,7 +1469,15 @@ impl Engine {
         if pos == 0 {
             return false;
         }
-        let below = self.doc.layers().iter_with_id().nth(pos - 1).unwrap().0;
+        let Some(below) = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .nth(pos - 1)
+            .map(|(id, _)| id)
+        else {
+            return false;
+        };
         let Some((index, above_layer)) = self.doc.layers_mut().remove(active) else {
             return false;
         };
@@ -1821,7 +1836,8 @@ impl Engine {
                     return;
                 }
             },
-            Dirty::Clean => unreachable!(),
+            // Clean 分支上方已提前返回；防御性兜底（不 panic）
+            Dirty::Clean => full,
         };
         let bg = self.doc.background();
         self.renderer
@@ -2021,12 +2037,15 @@ impl Engine {
             return;
         };
         // 稳定器收笔追赶：补齐滞后段的 dabs（在 recorder 存活期内）
+        // 先算追赶 dabs，经 stroke 通道盖章（复用选区/撤销采集），再取回
         let catch_up = self.brush.end(&mut act.state);
         if !catch_up.is_empty() {
             let layer = act.layer;
+            let recorder = std::mem::replace(&mut act.recorder, StrokeRecorder::new(layer));
             self.stroke = Some(act);
             self.stamp(layer, &catch_up);
-            act = self.stroke.take().unwrap();
+            act = self.stroke.take().expect("stamp 后 stroke 必在");
+            act.recorder = recorder;
         }
         let group = act.recorder.finish("Stroke");
         // 回收本笔触及且变回全透明的瓦片（橡皮/混合工具的常态）

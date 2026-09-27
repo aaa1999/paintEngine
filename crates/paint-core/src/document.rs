@@ -115,6 +115,21 @@ impl Document {
         &mut self.history
     }
 
+    /// 全文档瓦片内存（图层 + 蒙版，字节）。
+    pub fn tile_memory_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|l| {
+                l.tiles.memory_bytes() + l.mask.as_ref().map(|m| m.memory_bytes()).unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// 总内存（瓦片 + 撤销历史）。
+    pub fn total_memory_bytes(&self) -> usize {
+        self.tile_memory_bytes() + self.history.memory_used()
+    }
+
     pub fn background(&self) -> Color {
         self.background
     }
