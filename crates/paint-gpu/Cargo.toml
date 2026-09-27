@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-paint-core = { path = "../paint-core" }
+paint-core = { path = "../paint-core", default-features = false }
 paint-render = { path = "../paint-render" }
 wgpu = "27"
 pollster = "0.4"

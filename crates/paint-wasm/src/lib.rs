@@ -426,6 +426,7 @@ impl PaintApp {
     }
 
     /// SVG 导入。
+    #[cfg(feature = "svg")]
     pub fn import_svg(&self, svg: Vec<u8>, scale: f32) -> f64 {
         let mut inner = self.inner.borrow_mut();
         let r = inner

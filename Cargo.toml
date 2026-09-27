@@ -14,5 +14,8 @@ version = "0.1.0"
 edition = "2021"
 
 [profile.release]
-opt-level = 3
-lto = "thin"
+# 体积优先（wasm 产物从 4.13MB 降到 2.88MB）；native 构建如需速度可覆盖
+opt-level = "z"
+lto = "fat"
+strip = true
+codegen-units = 1

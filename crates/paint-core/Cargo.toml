@@ -8,12 +8,13 @@ edition.workspace = true
 png = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
-swash = "0.1"
+swash = { version = "0.1", optional = true }
 resvg = { version = "0.45", optional = true }
 jpeg-decoder = "0.3"
 jpeg-encoder = "0.6"
 image-webp = "0.2"
 
 [features]
-default = ["svg"]
+default = ["svg", "text"]
 svg = ["dep:resvg"]
+text = ["dep:swash"]

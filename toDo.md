@@ -26,7 +26,7 @@
 - [x] **滤镜系统** — Filter 框架（瓦片提取→处理→写回 + 选区蒙版混合 + 撤销）；首批 5 滤镜：模糊（box×3 近似高斯）/亮度对比度/色相饱和度（HSL 全链）/反色/灰度；桌面 F 键 / Web 按钮组。
 - [x] **图层组（轻量 MVP）** — Layer.group 标签分组 + 批量可见性切换 + Web 面板缩进显示；不做嵌套合成（组内层独立合成）。
 - [ ] **桌面可视面板** — 替换控制台输出为绘制面板（矩形 + swash 文字 + 点击交互）。需 Resize 传减面板宽或呈现拦截层。
-- [ ] **Wasm 瘦身** — wasm-opt + LTO + feature 裁剪。当前 release 可能 >5MB，优化后目标 <2MB。
+- [x] **Wasm 瘦身** — 三档产物（`./build-wasm.sh all`）：slim **837KB**（无 SVG/文字，-62%）/ full **2.1MB**（全功能）/ gpu **2.2MB**（+GPU）；opt-level=z + fat LTO + strip + codegen-units=1；paint-core 的 svg/text 改 optional 并在中间 crate 关闭 default-features 传播。
 - [ ] **多文档** — Engine 支持多 Document 实例切换（标签页）。
 
 ## 🏗️ 大工程（一周+）

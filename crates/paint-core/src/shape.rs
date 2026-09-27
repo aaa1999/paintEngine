@@ -130,6 +130,7 @@ pub fn line_dabs(
 
 /// swash 文本光栅化到网格。`x, y` 为首字基线左原点（画布坐标）。
 /// 返回写入的包围盒，失败（字体无效）返回 None。
+#[cfg(feature = "text")]
 #[allow(clippy::too_many_arguments)]
 pub fn draw_text(
     grid: &mut TileGrid,
