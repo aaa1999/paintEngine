@@ -345,6 +345,100 @@ fn box_blur_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
     }
 }
 
+/// 插件滤镜入口：处理函数外部注入（提取/写回管道复用）。
+pub fn apply_filter_via(
+    layer: &mut Layer,
+    _lid: LayerId,
+    processor: &mut dyn FnMut(&mut [u8], u32, u32),
+    selection: Option<&TileGrid>,
+    recorder: &mut StrokeRecorder,
+) {
+    let bbox = match selection {
+        Some(sel) => sel.content_bounds(),
+        None => layer.tiles.content_bounds_precise(),
+    };
+    let Some(bbox) = bbox else { return };
+    let (w, h) = (bbox.w, bbox.h);
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    let mut mask = vec![0u8; (w as usize) * (h as usize)];
+    let mut affected = Vec::new();
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let (cx, cy) = (bbox.x as i64 + x, bbox.y as i64 + y);
+            let tid = TileId::at(cx, cy);
+            let sel_v = match selection {
+                Some(sel) => sel
+                    .get(tid)
+                    .map(|t| {
+                        let (ox, oy) = tid.origin();
+                        t.pixels()[(((cy - oy) * 256 + (cx - ox)) * 4) as usize]
+                    })
+                    .unwrap_or(0),
+                None => 255,
+            };
+            mask[y as usize * w as usize + x as usize] = sel_v;
+            if sel_v == 0 {
+                continue;
+            }
+            if let Some(t) = layer.tiles.get(tid) {
+                let (ox, oy) = tid.origin();
+                let src = (((cy - oy) * 256 + (cx - ox)) * 4) as usize;
+                let p = t.pixels();
+                let a = p[src + 3] as u32;
+                if a == 0 {
+                    continue;
+                }
+                let dst = (y as usize * w as usize + x as usize) * 4;
+                for k in 0..3 {
+                    buf[dst + k] = ((p[src + k] as u32 * 255 + a / 2) / a).min(255) as u8;
+                }
+                buf[dst + 3] = a as u8;
+            }
+            if !affected.contains(&tid) {
+                affected.push(tid);
+            }
+        }
+    }
+    for tid in &affected {
+        recorder.capture(&layer.tiles, *tid);
+    }
+    processor(&mut buf, w, h);
+    // 写回（同 apply_filter 尾段）
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let idx = (y as usize * w as usize + x as usize) * 4;
+            let sel_v = mask[y as usize * w as usize + x as usize] as f32 / 255.0;
+            if sel_v == 0.0 {
+                continue;
+            }
+            let (cx, cy) = (bbox.x as i64 + x, bbox.y as i64 + y);
+            let tid = TileId::at(cx, cy);
+            let tile = layer.tiles.get_or_create_mut(tid);
+            let (ox, oy) = tid.origin();
+            let dst = (((cy - oy) * 256 + (cx - ox)) * 4) as usize;
+            let tp = tile.pixels_mut();
+            let a = buf[idx + 3] as u32;
+            if a == 0 {
+                continue;
+            }
+            let r = ((buf[idx] as u32 * a + 127) / 255) as u8;
+            let g = ((buf[idx + 1] as u32 * a + 127) / 255) as u8;
+            let b = ((buf[idx + 2] as u32 * a + 127) / 255) as u8;
+            if sel_v < 1.0 {
+                for (k, nv) in [r, g, b, a as u8].iter().enumerate() {
+                    tp[dst + k] = ((*nv as f32 * sel_v) as u16).min(255) as u8;
+                }
+            } else {
+                tp[dst] = r;
+                tp[dst + 1] = g;
+                tp[dst + 2] = b;
+                tp[dst + 3] = a as u8;
+            }
+        }
+    }
+    layer.tiles.prune();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

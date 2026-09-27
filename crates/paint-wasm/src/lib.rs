@@ -535,6 +535,30 @@ impl PaintApp {
         true
     }
 
+    /// 插件：滤镜列表 + 应用。
+    pub fn plugin_filter_names(&self) -> Vec<String> {
+        self.inner.borrow().engine.plugins().filter_names()
+    }
+    pub fn plugin_apply_filter(&self, name: String, params_json: String) -> bool {
+        // 参数走简单 JSON {"key": number} —— 解析
+        let mut params = paint_core::plugin::PluginParams::default();
+        if let Ok(v) = js_sys::JSON::parse(&params_json) {
+            if let Some(obj) = v.dyn_ref::<js_sys::Object>() {
+                for key in js_sys::Reflect::own_keys(obj).unwrap_or_default().iter() {
+                    if let (Some(k), Ok(val)) = (key.as_string(), js_sys::Reflect::get(obj, &key)) {
+                        if let Some(n) = val.as_f64() {
+                            params.set(&k, paint_core::plugin::ParamValue::Number(n as f32));
+                        }
+                    }
+                }
+            }
+        }
+        let mut inner = self.inner.borrow_mut();
+        let r = inner.engine.apply_plugin_filter(&name, &params);
+        inner.needs_render.set(true);
+        r
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

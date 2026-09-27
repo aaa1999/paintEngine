@@ -173,6 +173,17 @@ function refreshTabs() {
 }
 refreshTabs();
 
+// 插件滤镜
+$("fxPlugin").onclick = () => {
+  // 示例：R+30 B-20 通道偏移
+  const params = JSON.stringify({ r: 30, g: 0, b: -20 });
+  if (app.plugin_apply_filter("channel_shift", params)) {
+    $("status").textContent = "已应用插件滤镜: 通道偏移";
+  } else {
+    $("status").textContent = "插件滤镜不可用";
+  }
+};
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {

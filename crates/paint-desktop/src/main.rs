@@ -1037,6 +1037,17 @@ impl ApplicationHandler for App {
                                     );
                                 }
                             }
+                            "j" | "J" => {
+                                // 插件滤镜示例：通道偏移
+                                let mut params = paint_core::plugin::PluginParams::default();
+                                params.set("r", paint_core::plugin::ParamValue::Number(30.0));
+                                params.set("b", paint_core::plugin::ParamValue::Number(-20.0));
+                                if self.engine.apply_plugin_filter("channel_shift", &params) {
+                                    println!("已应用插件滤镜: 通道偏移");
+                                } else {
+                                    println!("插件不可用");
+                                }
+                            }
                             "f" | "F" if !ctrl => {
                                 // 简易滤镜：反色（最直观）
                                 if self.engine.apply_filter(paint_core::filter::Filter::Invert) {

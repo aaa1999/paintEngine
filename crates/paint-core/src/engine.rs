@@ -196,6 +196,8 @@ pub struct Engine {
     preset_idx: Option<usize>,
     /// 对称绘画模式。
     symmetry: SymmetryMode,
+    /// 插件注册表。
+    plugins: crate::plugin::PluginRegistry,
 }
 
 impl Engine {
@@ -223,6 +225,7 @@ impl Engine {
             presets: builtin_presets(),
             preset_idx: None,
             symmetry: SymmetryMode::None,
+            plugins: crate::plugin::PluginRegistry::with_builtin_examples(),
         }
     }
 
@@ -327,6 +330,60 @@ impl Engine {
     /// 组名列表。
     pub fn group_names(&self) -> Vec<String> {
         self.doc.layers().group_names()
+    }
+
+    // ── 插件 ──
+
+    pub fn plugins(&self) -> &crate::plugin::PluginRegistry {
+        &self.plugins
+    }
+
+    pub fn plugins_mut(&mut self) -> &mut crate::plugin::PluginRegistry {
+        &mut self.plugins
+    }
+
+    /// 应用注册的滤镜插件（选区感知 + 撤销）。
+    pub fn apply_plugin_filter(
+        &mut self,
+        name: &str,
+        params: &crate::plugin::PluginParams,
+    ) -> bool {
+        if self.transforming() || self.plugins.filter(name).is_none() {
+            return false;
+        }
+        let Some(layer_id) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let selection = self.doc.selection().cloned();
+
+        // 复用 filter.rs 的提取/写回管道，仅处理函数换为插件
+        let bbox = match selection.as_ref() {
+            Some(sel) => sel.content_bounds(),
+            None => self
+                .doc
+                .layers()
+                .get(layer_id)
+                .tiles
+                .content_bounds_precise(),
+        };
+        let Some(_bbox) = bbox else { return false };
+        let mut recorder = StrokeRecorder::new(layer_id);
+        {
+            let l = self.doc.layers_mut().get_mut(layer_id);
+            // 提取 → 插件处理 → 写回（直接走 filter 管道的变体）
+            crate::filter::apply_filter_via(
+                l,
+                layer_id,
+                &mut |px, w, h| {
+                    self.plugins.run_filter(name, px, w, h, params);
+                },
+                selection.as_ref(),
+                &mut recorder,
+            );
+        }
+        self.doc.commit(recorder.finish("PluginFilter"));
+        self.dirty = Dirty::All;
+        true
     }
 
     /// 对活动图层（或选区内）应用滤镜。入撤销历史。

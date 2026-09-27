@@ -34,7 +34,7 @@
 - [ ] **iOS 壳** — Swift + Metal。最大缺失平台。需讨论：UIKit View vs SwiftUI、签名调试条件。
 - [ ] **PSD 导入** — Adobe 格式极其复杂。建议只做合并层只读（不做分层/效果/文字还原）。
 - [ ] **调整图层** — 非破坏性编辑（亮度/曲线/色阶作为可编辑图层属性）。
-- [ ] **插件 API** — 用户自定义笔刷/滤镜的动态加载（WASM 模块或脚本语言）。
+- [x] **插件 API** — 编译期插件（Rust trait 对象）：TipPlugin/FilterPlugin/ToolPlugin 三扩展点 + PluginRegistry（Arc 共享，宿主持有）；参数系统（Range/Toggle/Choice 定义 + 运行时值）；PluginAction 安全动作模型（工具插件不能直接改图层）；filter.rs apply_filter_via 管道复用（插件处理函数注入）；内置示例：星形/菱形笔尖 + 通道偏移滤镜；Web 插件按钮（JSON 参数）+ 桌面 J 键。运行时插件（WASM 模块）接口已预留——宿主代码只依赖 PluginRegistry。
 - [x] **笔刷引擎重构** — brush.rs 模块：BrushTip 形状抽象（圆头 SDF/方形 SDF 含圆角/纹理图采样）+ coverage 统一接口；DualBrush 双重笔尖（Intersect/Union/Subtract 三组合模式 + 副笔尺寸比/角度偏移/间距比）；stamp 热路径内联组合采样（副笔坐标反旋转→副角度系）；RoundBrush 扩展 brush_tip/dual 字段（序列化预设向后兼容：dual 不参与文本格式）。
 
 ## ⚠️ 工程健康（不紧急但迟早要做）
