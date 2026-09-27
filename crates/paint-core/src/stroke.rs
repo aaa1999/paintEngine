@@ -60,6 +60,8 @@ pub struct Dab {
     pub aspect: f32,
     /// 长轴方向（弧度；长轴 ⟂ 笔倾斜方向，模拟笔尖排线）。
     pub angle: f32,
+    /// 双重笔尖（Box 控制热结构尺寸；None = 单笔尖）。
+    pub dual: Option<Box<crate::brush::DualBrush>>,
 }
 
 /// 一笔的进行时状态（平滑位置、间距游标）。
@@ -126,12 +128,16 @@ pub struct RoundBrush {
     pub pressure_gamma: f32,
     pub color: Color,
     pub mode: DabMode,
-    /// 纹理笔刷尖。
+    /// 纹理笔刷尖（Image tip 快捷方式；与 brush_tip 二选一）。
     pub tip: Option<std::sync::Arc<TipTexture>>,
     /// 尖图散布强度 0..1。
     pub scatter: f32,
     /// 笔倾斜灵敏度 0..1：倾斜→各向异性笔形（书法效果），0 关闭。
     pub tilt_sensitivity: f32,
+    /// 笔尖形状（None = 由 hardness 决定的圆头；Some 时覆盖）。
+    pub brush_tip: Option<crate::brush::BrushTip>,
+    /// 双重笔尖。
+    pub dual: crate::brush::DualBrush,
 }
 
 impl Default for RoundBrush {
@@ -150,6 +156,8 @@ impl Default for RoundBrush {
             tip: None,
             scatter: 0.0,
             tilt_sensitivity: 0.0,
+            brush_tip: None,
+            dual: crate::brush::DualBrush::default(),
         }
     }
 }
@@ -198,6 +206,11 @@ impl RoundBrush {
             scatter: self.scatter,
             aspect,
             angle,
+            dual: if self.dual.mode == crate::brush::DualMode::Off {
+                None
+            } else {
+                Some(Box::new(self.dual.clone()))
+            },
         }
     }
 }

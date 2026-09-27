@@ -24,6 +24,7 @@ fn dab(x: f64, y: f64, r: f32, color: Color, alpha: f32) -> Dab {
         scatter: 0.0,
         aspect: 1.0,
         angle: 0.0,
+        dual: None,
     }
 }
 

@@ -26,6 +26,7 @@ fn dab(x: f64, y: f64, r: f32, c: Color) -> Dab {
         scatter: 0.0,
         aspect: 1.0,
         angle: 0.0,
+        dual: None,
     }
 }
 
@@ -145,6 +146,7 @@ fn bench_stamp() {
                 scatter: 0.0,
                 aspect: 1.0,
                 angle: 0.0,
+                dual: None,
             })
             .collect();
         let mut rec = paint_core::history::StrokeRecorder::new(paint_core::LayerId::from_raw(0));
@@ -182,6 +184,7 @@ fn bench_gpu_stamp() {
                 scatter: 0.0,
                 aspect: 1.0,
                 angle: 0.0,
+                dual: None,
             })
             .collect();
 

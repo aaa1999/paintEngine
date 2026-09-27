@@ -82,6 +82,7 @@ mod tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         }];
         let l = layers.get_mut(id);
         super::super::stamp::stamp_dabs(&mut l.tiles, &dabs, None, &mut StrokeRecorder::new(id));

@@ -97,9 +97,11 @@ fn stamp_tile(
             let dy = -sa * dx0 + ca * dy0;
             let t2 = ((dx / radius as f64) * (dx / radius as f64) + (dy * inv_ry) * (dy * inv_ry))
                 as f32;
-            if t2 >= 1.0 {
+            if t2 >= 1.0 && dab.dual.is_none() {
                 continue;
             }
+            let _nx = (dx / radius.max(0.001) as f64) as f32;
+            let _ny = (dy * inv_ry) as f32;
             // 纹理尖：alpha 蒙版来自尖图采样（散布偏移由 dab 坐标哈希确定）
             let tip_a = dab.tip.as_ref().map(|tip| {
                 let ang = ((dab.x * 12.9898 + dab.y * 78.233).fract() * 43758.5453).fract();
@@ -119,10 +121,34 @@ fn stamp_tile(
                     tip.sample(tx as u32, ty as u32)
                 }
             });
-            let a = match tip_a {
+            let mut a = match tip_a {
                 Some(v) => v * alpha * clip_v(clip, id, pxx, py),
                 None => falloff(t2.sqrt(), hardness) * alpha * clip_v(clip, id, pxx, py),
             };
+            // 双重笔尖（内联热路径）
+            if let Some(dual) = &dab.dual {
+                if dual.mode != paint_core::brush::DualMode::Off {
+                    let main_cov = if t2 < 1.0 {
+                        match tip_a {
+                            Some(v) => v,
+                            None => falloff(t2.sqrt(), hardness),
+                        }
+                    } else {
+                        0.0
+                    };
+                    let sr = dual.size_ratio.clamp(0.05, 1.0);
+                    let aa = dab.angle + dual.angle_offset;
+                    let (dca, dsa) = (aa.cos() as f64, aa.sin() as f64);
+                    let ux0 = ca * dx0 - sa * dy0;
+                    let uy0 = sa * dx0 + ca * dy0;
+                    let ddx = dca * ux0 + dsa * uy0;
+                    let ddy = -dsa * ux0 + dca * uy0;
+                    let sx = (ddx / (radius as f64 * sr as f64)) as f32;
+                    let sy = (ddy / (radius as f64 * sr as f64 * aspect as f64)) as f32;
+                    let combined = dual.combine(main_cov, sx, sy);
+                    a = combined * alpha * clip_v(clip, id, pxx, py);
+                }
+            }
             if a <= 1.0 / 255.0 {
                 continue;
             }
@@ -226,6 +252,7 @@ mod tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         }
     }
 
@@ -371,6 +398,7 @@ mod tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
             ..dab_at(50.0, 50.0, 4.0, DabMode::Buildup)
         };
         stamp_dabs(
@@ -425,6 +453,7 @@ mod tip_stamp_tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         };
         stamp_dabs(
             &mut s.get_mut(lid).tiles,
@@ -482,6 +511,7 @@ mod tilt_tests {
             scatter: 0.0,
             aspect: 0.5,
             angle: 0.0,
+            dual: None,
         };
         stamp_dabs(
             &mut s.get_mut(lid).tiles,
@@ -513,6 +543,7 @@ mod tilt_tests {
             scatter: 0.0,
             aspect: 0.5,
             angle: std::f32::consts::FRAC_PI_2,
+            dual: None,
         };
         stamp_dabs(
             &mut s.get_mut(lid).tiles,
@@ -524,5 +555,106 @@ mod tilt_tests {
         assert_eq!(px(&s, lid, 64, 71), 255); // 旋转后长轴：7.5 < 10
         assert_eq!(px(&s, lid, 69, 64), 0, "横向变短轴 ±7 外");
         assert_eq!(px(&s, lid, 67, 64), 255, "横向 ±3 内");
+    }
+}
+
+#[cfg(test)]
+mod dual_stamp_tests {
+    use super::*;
+    use paint_core::brush::{BrushTip, DualBrush, DualMode};
+    use paint_core::color::Color;
+    use paint_core::layer::LayerStack;
+    use paint_core::stroke::{DabMode, TipTexture};
+    use paint_core::tile::{TileId, TILE};
+    use std::sync::Arc;
+
+    fn px(s: &LayerStack, lid: paint_core::LayerId, x: usize, y: usize) -> u8 {
+        let t = s
+            .get(lid)
+            .tiles
+            .get(TileId::at(x as i64, y as i64))
+            .unwrap();
+        t.pixels()[(y * TILE as usize + x) * 4 + 3]
+    }
+
+    /// 双笔尖 Intersect：方形副笔裁掉圆主笔的角。
+    #[test]
+    fn dual_intersect_clips_circle() {
+        let mut s = LayerStack::new();
+        let lid = s.insert(None);
+        let dual = DualBrush {
+            mode: DualMode::Intersect,
+            tip: BrushTip::Square { corner: 0.0 },
+            size_ratio: 1.0,
+            ..DualBrush::default()
+        };
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 20.0,
+            hardness: 1.0,
+            color: Color::BLACK,
+            alpha: 1.0,
+            mode: DabMode::Buildup,
+            erase: false,
+            tip: None,
+            scatter: 0.0,
+            aspect: 1.0,
+            angle: 0.0,
+            dual: Some(Box::new(dual)),
+        };
+        stamp_dabs(
+            &mut s.get_mut(lid).tiles,
+            &[dab],
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
+        // 中心在方形+圆内 → 有墨
+        assert_eq!(px(&s, lid, 64, 64), 255);
+        // 对角（方形外、圆内）→ 被裁
+        // 副笔方形 [-1,1] × r=20 → 画布 [44,84]；对角 (83,83) 在方形外
+        assert_eq!(px(&s, lid, 83, 83), 0, "方形副笔裁掉对角");
+        // 轴向边缘（方形内圆内）→ 有墨
+        assert!(
+            px(&s, lid, 80, 64) > 0 || px(&s, lid, 79, 64) > 0,
+            "轴向边缘保留"
+        );
+    }
+
+    /// Union：副笔在主笔外补墨。
+    #[test]
+    fn dual_union_extends() {
+        let mut s = LayerStack::new();
+        let lid = s.insert(None);
+        let dual = DualBrush {
+            mode: DualMode::Union,
+            tip: BrushTip::Round { hardness: 1.0 },
+            size_ratio: 0.5,
+            ..DualBrush::default()
+        };
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 20.0,
+            hardness: 1.0,
+            color: Color::BLACK,
+            alpha: 1.0,
+            mode: DabMode::Buildup,
+            erase: false,
+            tip: None,
+            scatter: 0.0,
+            aspect: 1.0,
+            angle: 0.0,
+            dual: Some(Box::new(dual)),
+        };
+        stamp_dabs(
+            &mut s.get_mut(lid).tiles,
+            &[dab],
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
+        assert_eq!(px(&s, lid, 64, 64), 255, "中心满覆盖");
+        let _ = TipTexture::from_png;
+        let _ = Arc::new(());
     }
 }

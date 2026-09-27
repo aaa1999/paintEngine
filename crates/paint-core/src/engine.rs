@@ -2267,6 +2267,8 @@ impl Engine {
                 mode,
                 color: Color { r, g, b },
                 tip: None,
+                brush_tip: None,
+                dual: crate::brush::DualBrush::default(),
             };
             if let Some(i) = self.presets.iter().position(|(n, _)| *n == name) {
                 self.presets[i].1 = brush;
@@ -2630,6 +2632,7 @@ mod symmetry_tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         };
         let v = mode.expand_dab(&dab);
         assert_eq!(v.len(), 2);

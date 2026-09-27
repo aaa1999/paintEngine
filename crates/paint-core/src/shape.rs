@@ -123,6 +123,7 @@ pub fn line_dabs(
                 scatter: 0.0,
                 aspect: 1.0,
                 angle: 0.0,
+                dual: None,
             }
         })
         .collect()

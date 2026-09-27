@@ -6,6 +6,7 @@
 //! 与外界（软件/GPU 渲染器、平台壳层）协作。
 
 pub mod blend;
+pub mod brush;
 pub mod color;
 pub mod document;
 pub mod engine;

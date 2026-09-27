@@ -659,6 +659,7 @@ mod tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         }];
         let layer = layers.get_mut(lid);
         super::super::stamp::stamp_dabs(
@@ -885,6 +886,7 @@ mod tests {
             scatter: 0.0,
             aspect: 1.0,
             angle: 0.0,
+            dual: None,
         }];
         let layer = layers.get_mut(top);
         super::super::stamp::stamp_dabs(
