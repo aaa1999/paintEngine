@@ -27,6 +27,7 @@ impl Affine2 {
         f: 0.0,
     };
 
+    /// 平移矩阵。
     pub fn translation(tx: f64, ty: f64) -> Self {
         Self {
             e: tx,
@@ -35,6 +36,7 @@ impl Affine2 {
         }
     }
 
+    /// 旋转矩阵。
     pub fn rotation(rad: f64) -> Self {
         let (s, c) = (rad.sin(), rad.cos());
         Self {
@@ -46,6 +48,7 @@ impl Affine2 {
         }
     }
 
+    /// 缩放矩阵。
     pub fn scale(sx: f64, sy: f64) -> Self {
         Self {
             a: sx,
@@ -66,6 +69,7 @@ impl Affine2 {
         }
     }
 
+    /// 应用变换到点。
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         (
             self.a * x + self.b * y + self.e,
@@ -125,6 +129,7 @@ impl Floating {
         self.affine = Affine2::around(&Affine2::scale(factor, factor), cur).then(&self.affine);
     }
 
+    /// 平移累积。
     pub fn translate(&mut self, dx: f64, dy: f64) {
         self.affine = Affine2::translation(dx, dy).then(&self.affine);
     }

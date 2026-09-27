@@ -125,6 +125,7 @@ impl SymmetryMode {
         }
     }
 
+    /// 名称。
     pub fn name(&self) -> &'static str {
         match self {
             SymmetryMode::None => "关",
@@ -202,6 +203,13 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// 创建引擎（渲染后端 + 配置）。
+    ///
+    /// # 示例
+    /// ```text
+    /// // renderer: 任何实现 Renderer trait 的后端（如 paint_render::SoftwareRenderer）
+    /// let engine = Engine::new(renderer, EngineConfig::default());
+    /// ```
     pub fn new(renderer: Box<dyn Renderer>, config: EngineConfig) -> Self {
         let background = config.background;
         let mut doc = Document::new(config.undo_memory_limit);
@@ -230,6 +238,7 @@ impl Engine {
         }
     }
 
+    /// 只读文档访问。
     pub fn document(&self) -> &Document {
         &self.doc
     }
@@ -241,24 +250,29 @@ impl Engine {
         (tiles, undo, tiles + undo)
     }
 
+    /// 可变文档访问（视口/图层属性直改——引擎自动检测变更）。
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.doc
     }
 
+    /// 当前笔刷（读）。
     pub fn brush(&self) -> &RoundBrush {
         &self.brush
     }
 
+    /// 当前笔刷（写）。
     pub fn brush_mut(&mut self) -> &mut RoundBrush {
         &mut self.brush
     }
 
     // ── 对称绘画 ──
 
+    /// 对称模式。
     pub fn symmetry(&self) -> &SymmetryMode {
         &self.symmetry
     }
 
+    /// 设置对称模式。
     pub fn set_symmetry(&mut self, mode: SymmetryMode) {
         self.symmetry = mode;
     }
@@ -304,6 +318,7 @@ impl Engine {
         self.dirty = Dirty::All;
     }
 
+    /// 画布尺寸（None = 无限）。
     pub fn canvas_bounds(&self) -> Option<Rect> {
         self.doc.canvas()
     }
@@ -342,10 +357,12 @@ impl Engine {
 
     // ── 插件 ──
 
+    /// 插件注册表（读）。
     pub fn plugins(&self) -> &crate::plugin::PluginRegistry {
         &self.plugins
     }
 
+    /// 插件注册表（写——注册插件）。
     pub fn plugins_mut(&mut self) -> &mut crate::plugin::PluginRegistry {
         &mut self.plugins
     }
@@ -402,6 +419,7 @@ impl Engine {
         }
     }
 
+    /// 活动图层调整参数。
     pub fn layer_adjustment(&self) -> Option<crate::layer::LayerAdjustment> {
         self.doc
             .layers()
@@ -428,6 +446,7 @@ impl Engine {
         true
     }
 
+    /// 内置滤镜名列表。
     pub fn filter_names() -> Vec<&'static str> {
         vec!["模糊", "亮度/对比度", "色相/饱和度", "反色", "灰度"]
     }
@@ -469,10 +488,12 @@ impl Engine {
         self.brush.scatter = v.clamp(0.0, 1.0);
     }
 
+    /// 当前工具。
     pub fn tool(&self) -> Tool {
         self.tool
     }
 
+    /// 切换工具（画笔/橡皮/蒙版编辑）。
     pub fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
     }
@@ -519,6 +540,7 @@ impl Engine {
         self.size
     }
 
+    /// 当前脏区状态。
     pub fn dirty(&self) -> Dirty {
         self.dirty
     }
@@ -528,6 +550,7 @@ impl Engine {
         self.doc.show_grid()
     }
 
+    /// 网格开关。
     pub fn set_show_grid(&mut self, on: bool) {
         self.doc.set_show_grid(on);
         self.dirty = Dirty::All;
@@ -589,6 +612,7 @@ impl Engine {
 
     // ── 图层结构 API（撤销走 Document 历史）──
 
+    /// 新建图层（入撤销）。
     pub fn add_layer(&mut self) -> Option<LayerId> {
         let r = self.doc.add_layer(None);
         if r.is_some() {
@@ -597,6 +621,7 @@ impl Engine {
         r
     }
 
+    /// 删除图层（入撤销）。
     pub fn remove_layer(&mut self, id: LayerId) -> bool {
         let r = self.doc.remove_layer(id);
         if r {
@@ -605,6 +630,7 @@ impl Engine {
         r
     }
 
+    /// 复制图层（入撤销）。
     pub fn duplicate_layer(&mut self, id: LayerId) -> Option<LayerId> {
         let r = self.doc.duplicate_layer(id);
         if r.is_some() {
@@ -613,6 +639,7 @@ impl Engine {
         r
     }
 
+    /// 重排图层（入撤销）。
     pub fn reorder_layer(&mut self, id: LayerId, to: usize) -> bool {
         let r = self.doc.reorder_layer(id, to);
         if r {
@@ -795,6 +822,7 @@ impl Engine {
         true
     }
 
+    /// 内部剪贴板非空。
     pub fn has_clipboard(&self) -> bool {
         self.clipboard.is_some()
     }
@@ -880,6 +908,7 @@ impl Engine {
 
     // ── 内容级变换（选区或整层的移动/旋转/缩放，浮动预览）──
 
+    /// 内容级变换进行中。
     pub fn transforming(&self) -> bool {
         self.doc.floating().is_some()
     }
@@ -976,6 +1005,7 @@ impl Engine {
         true
     }
 
+    /// 变换平移（画布坐标）。
     pub fn transform_translate(&mut self, dx: f64, dy: f64) {
         if let Some(f) = self.doc.floating_mut() {
             f.translate(dx, dy);
@@ -983,6 +1013,7 @@ impl Engine {
         }
     }
 
+    /// 变换旋转（弧度，绕内容中心）。
     pub fn transform_rotate(&mut self, delta_rad: f64) {
         if let Some(f) = self.doc.floating_mut() {
             f.rotate(delta_rad);
@@ -990,6 +1021,7 @@ impl Engine {
         }
     }
 
+    /// 变换缩放（绕内容中心）。
     pub fn transform_scale(&mut self, factor: f64) {
         if let Some(f) = self.doc.floating_mut() {
             f.scale(factor);
@@ -1126,14 +1158,17 @@ impl Engine {
         bounds
     }
 
+    /// 矩形填充（入撤销）。
     pub fn fill_rect(&mut self, rect: Rect) -> bool {
         self.run_shape(|w| w.fill_rect(rect))
     }
 
+    /// 椭圆填充（入撤销）。
     pub fn fill_ellipse(&mut self, cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
         self.run_shape(move |w| w.fill_ellipse(cx, cy, rx, ry))
     }
 
+    /// 椭圆轮廓（入撤销）。
     pub fn stroke_ellipse(&mut self, cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
         self.run_shape(move |w| w.stroke_ellipse(cx, cy, rx, ry))
     }
@@ -1193,6 +1228,7 @@ impl Engine {
         self.doc.selection().is_some()
     }
 
+    /// 清除选区。
     pub fn clear_selection(&mut self) {
         if self.doc.set_selection(None) {
             self.dirty = Dirty::All;
@@ -1306,6 +1342,7 @@ impl Engine {
         }
     }
 
+    /// 图层可见性。
     pub fn set_layer_visible(&mut self, id: LayerId, v: bool) {
         if let Some(l) = self.doc.layers_mut().try_get_mut(id) {
             l.visible = v;
@@ -1313,6 +1350,7 @@ impl Engine {
         }
     }
 
+    /// 图层混合模式。
     pub fn set_layer_blend_mode(&mut self, id: LayerId, mode: BlendMode) {
         if let Some(l) = self.doc.layers_mut().try_get_mut(id) {
             l.blend_mode = mode;
@@ -1339,10 +1377,12 @@ impl Engine {
             .collect()
     }
 
+    /// 活动图层原始 id。
     pub fn active_layer_id(&self) -> Option<u64> {
         self.doc.layers().try_active().map(|l| l.to_raw())
     }
 
+    /// 按 id 选层。
     pub fn select_layer_by_id(&mut self, raw: u64) -> bool {
         let id = LayerId::from_raw(raw);
         if !self.doc.layers().contains(id) {
@@ -1353,6 +1393,7 @@ impl Engine {
         true
     }
 
+    /// 12 种混合模式名。
     pub fn blend_mode_names() -> Vec<&'static str> {
         BlendMode::ALL.iter().map(|m| m.name()).collect()
     }
@@ -1371,6 +1412,7 @@ impl Engine {
         self.reorder_layer(LayerId::from_raw(id), to)
     }
 
+    /// 按栈位删除。
     pub fn remove_layer_by_index(&mut self, index: usize) -> bool {
         let Some(id) = self
             .doc
@@ -1384,6 +1426,7 @@ impl Engine {
         self.remove_layer(LayerId::from_raw(id))
     }
 
+    /// 按栈位复制。
     pub fn duplicate_layer_by_index(&mut self, index: usize) -> Option<u64> {
         let id_opt = self
             .doc
@@ -1395,6 +1438,7 @@ impl Engine {
         self.duplicate_layer(id).map(|l| l.to_raw())
     }
 
+    /// 按栈位设透明度。
     pub fn set_layer_opacity_by_index(&mut self, index: usize, v: f32) {
         let id_opt = self
             .doc
@@ -1407,6 +1451,7 @@ impl Engine {
         }
     }
 
+    /// 按栈位设可见性。
     pub fn set_layer_visible_by_index(&mut self, index: usize, v: bool) {
         let id_opt = self
             .doc
@@ -1419,6 +1464,7 @@ impl Engine {
         }
     }
 
+    /// 按栈位设混合模式。
     pub fn set_layer_blend_by_index(&mut self, index: usize, mode_idx: usize) {
         let id_opt = self
             .doc
@@ -1789,6 +1835,7 @@ impl Engine {
 
     // ── 事件与帧 ──
 
+    /// 平台事件入口（指针/键盘/焦点/尺寸——壳层唯一输入通道）。
     pub fn handle_event(&mut self, ev: PlatformEvent) {
         match ev {
             PlatformEvent::Resize { w, h, .. } => {
@@ -1846,6 +1893,7 @@ impl Engine {
         self.dirty = Dirty::Clean;
     }
 
+    /// 撤销一步。
     pub fn undo(&mut self) -> bool {
         if self.transforming() {
             return false; // 变换未提交前不动历史（提交时整组入史）
@@ -1858,6 +1906,7 @@ impl Engine {
         }
     }
 
+    /// 重做一步。
     pub fn redo(&mut self) -> bool {
         if self.transforming() {
             return false;
@@ -2185,10 +2234,12 @@ fn builtin_presets() -> Vec<(String, RoundBrush)> {
 impl Engine {
     // ── 笔刷预设 ──
 
+    /// 预设名列表。
     pub fn preset_names(&self) -> Vec<String> {
         self.presets.iter().map(|(n, _)| n.clone()).collect()
     }
 
+    /// 当前预设名。
     pub fn current_preset_name(&self) -> Option<String> {
         self.preset_idx.map(|i| self.presets[i].0.clone())
     }
@@ -2223,6 +2274,7 @@ impl Engine {
         true
     }
 
+    /// 删除预设。
     pub fn delete_preset(&mut self, name: &str) -> bool {
         let Some(i) = self.presets.iter().position(|(n, _)| n == name) else {
             return false;

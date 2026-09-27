@@ -26,6 +26,7 @@ pub struct PointerSample {
 }
 
 impl PointerSample {
+    /// 鼠标采样（无压感/倾斜）。
     pub fn mouse(x: f64, y: f64) -> Self {
         Self {
             x,
@@ -40,6 +41,7 @@ impl PointerSample {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 指针相位（按下/移动/抬起/取消）。
 pub enum PointerPhase {
     Down,
     Move,

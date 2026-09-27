@@ -31,6 +31,7 @@ pub struct ShapeWriter<'a> {
 }
 
 impl<'a> ShapeWriter<'a> {
+    /// 形状写入器。
     pub fn new(grid: &'a mut TileGrid, recorder: &'a mut StrokeRecorder, color: Color) -> Self {
         Self {
             grid,
@@ -40,6 +41,7 @@ impl<'a> ShapeWriter<'a> {
         }
     }
 
+    /// 画一个像素。
     pub fn px(&mut self, x: i64, y: i64) {
         let tid = TileId::at(x, y);
         if !self.touched.contains(&tid) {

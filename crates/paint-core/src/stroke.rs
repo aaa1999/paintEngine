@@ -33,6 +33,7 @@ impl TipTexture {
     }
 
     #[inline]
+    /// 纹理采样（最近邻）。
     pub fn sample(&self, x: u32, y: u32) -> f32 {
         self.data[(y * self.size + x) as usize] as f32 / 255.0
     }
@@ -79,6 +80,7 @@ pub struct StrokeState {
 }
 
 impl StrokeState {
+    /// 初始状态（位置 x,y 半径 radius）。
     pub fn new(x: f64, y: f64, radius: f32) -> Self {
         Self {
             smooth: (x, y),

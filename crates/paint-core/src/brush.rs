@@ -68,6 +68,7 @@ impl BrushTip {
         }
     }
 
+    /// 笔尖名。
     pub fn name(&self) -> &'static str {
         match self {
             BrushTip::Round { .. } => "圆头",

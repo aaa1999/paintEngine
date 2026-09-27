@@ -74,6 +74,7 @@ pub struct PluginParam {
 }
 
 #[derive(Debug, Clone)]
+/// 参数 UI 类型（宿主自动渲染控件）。
 pub enum ParamKind {
     /// 滑杆 min..max。
     Range { min: f32, max: f32, default: f32 },
@@ -93,10 +94,12 @@ pub struct PluginParams {
 }
 
 impl PluginParams {
+    /// 设置参数值。
     pub fn set(&mut self, key: &str, v: ParamValue) {
         self.values.insert(key.to_string(), v);
     }
 
+    /// 读数值（类型不匹配回退默认）。
     pub fn get_f32(&self, key: &str, default: f32) -> f32 {
         match self.values.get(key) {
             Some(ParamValue::Number(v)) => *v,
@@ -104,6 +107,7 @@ impl PluginParams {
         }
     }
 
+    /// 读开关。
     pub fn get_bool(&self, key: &str, default: bool) -> bool {
         match self.values.get(key) {
             Some(ParamValue::Bool(v)) => *v,
@@ -111,6 +115,7 @@ impl PluginParams {
         }
     }
 
+    /// 读选项索引。
     pub fn get_choice(&self, key: &str, default: usize) -> usize {
         match self.values.get(key) {
             Some(ParamValue::Choice(v)) => *v,
@@ -120,6 +125,7 @@ impl PluginParams {
 }
 
 #[derive(Debug, Clone)]
+/// 参数运行时值。
 pub enum ParamValue {
     Number(f32),
     Bool(bool),
@@ -163,44 +169,54 @@ pub struct PluginRegistry {
 }
 
 impl PluginRegistry {
+    /// 空注册表。
     pub fn new() -> Self {
         Self::default()
     }
 
     // 注册
+    /// 注册笔尖插件。
     pub fn register_tip(&mut self, p: Arc<dyn TipPlugin>) {
         self.tips.insert(p.name().to_string(), p);
     }
 
+    /// 注册滤镜插件。
     pub fn register_filter(&mut self, p: Arc<dyn FilterPlugin>) {
         self.filters.insert(p.name().to_string(), p);
     }
 
+    /// 注册工具插件。
     pub fn register_tool(&mut self, p: Arc<dyn ToolPlugin>) {
         self.tools.insert(p.name().to_string(), p);
     }
 
     // 查询
+    /// 按名取笔尖。
     pub fn tip(&self, name: &str) -> Option<Arc<dyn TipPlugin>> {
         self.tips.get(name).cloned()
     }
 
+    /// 按名取滤镜。
     pub fn filter(&self, name: &str) -> Option<Arc<dyn FilterPlugin>> {
         self.filters.get(name).cloned()
     }
 
+    /// 按名取工具。
     pub fn tool(&self, name: &str) -> Option<Arc<dyn ToolPlugin>> {
         self.tools.get(name).cloned()
     }
 
+    /// 笔尖名列表。
     pub fn tip_names(&self) -> Vec<String> {
         self.tips.keys().cloned().collect()
     }
 
+    /// 滤镜名列表。
     pub fn filter_names(&self) -> Vec<String> {
         self.filters.keys().cloned().collect()
     }
 
+    /// 工具名列表。
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.keys().cloned().collect()
     }

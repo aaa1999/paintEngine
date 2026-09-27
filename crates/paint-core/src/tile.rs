@@ -42,20 +42,24 @@ pub struct TileData {
 }
 
 impl TileData {
+    /// 全透明瓦片。
     pub fn transparent() -> Self {
         Self {
             px: vec![0; TILE_BYTES],
         }
     }
 
+    /// 像素数据（预乘 RGBA8）。
     pub fn pixels(&self) -> &[u8] {
         &self.px
     }
 
+    /// 可变像素数据。
     pub fn pixels_mut(&mut self) -> &mut [u8] {
         &mut self.px
     }
 
+    /// 全部像素 alpha=0。
     pub fn is_transparent(&self) -> bool {
         self.px.as_chunks::<4>().0.iter().all(|p| p[3] == 0)
     }
@@ -81,18 +85,22 @@ impl std::fmt::Debug for TileGrid {
 }
 
 impl TileGrid {
+    /// 空网格。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 读瓦片。
     pub fn get(&self, id: TileId) -> Option<&TileRef> {
         self.tiles.get(&id)
     }
 
+    /// 瓦片存在。
     pub fn contains(&self, id: TileId) -> bool {
         self.tiles.contains_key(&id)
     }
 
+    /// 瓦片数。
     pub fn len(&self) -> usize {
         self.tiles.len()
     }
@@ -102,18 +110,22 @@ impl TileGrid {
         self.tiles.len() * TILE_BYTES
     }
 
+    /// 空网格。
     pub fn is_empty(&self) -> bool {
         self.tiles.is_empty()
     }
 
+    /// 写入瓦片（撤销快照用 Arc 共享）。
     pub fn set(&mut self, id: TileId, tile: TileRef) {
         self.tiles.insert(id, tile);
     }
 
+    /// 移除瓦片。
     pub fn remove(&mut self, id: TileId) -> Option<TileRef> {
         self.tiles.remove(&id)
     }
 
+    /// 瓦片 id 迭代。
     pub fn ids(&self) -> impl Iterator<Item = TileId> + '_ {
         self.tiles.keys().copied()
     }

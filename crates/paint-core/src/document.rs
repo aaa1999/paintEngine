@@ -52,26 +52,32 @@ impl Document {
         }
     }
 
+    /// 固定画布尺寸（None = 无限画布）。
     pub fn canvas(&self) -> Option<crate::geometry::Rect> {
         self.canvas
     }
 
+    /// 设置/清除画布尺寸。
     pub fn set_canvas(&mut self, rect: Option<crate::geometry::Rect>) {
         self.canvas = rect;
     }
 
+    /// 变换中的浮动层（只读）。
     pub fn floating(&self) -> Option<&crate::float::Floating> {
         self.floating.as_ref()
     }
 
+    /// 浮动层（可变）。
     pub fn floating_mut(&mut self) -> Option<&mut crate::float::Floating> {
         self.floating.as_mut()
     }
 
+    /// 设置/清除浮动层。
     pub fn set_floating(&mut self, f: Option<crate::float::Floating>) {
         self.floating = f;
     }
 
+    /// 像素级选区（R 通道网格；None = 无选区）。
     pub fn selection(&self) -> Option<&crate::tile::TileGrid> {
         self.selection.as_ref()
     }
@@ -83,34 +89,42 @@ impl Document {
         changed
     }
 
+    /// 图层栈（只读）。
     pub fn layers(&self) -> &LayerStack {
         &self.layers
     }
 
+    /// 图层栈（可变）。
     pub fn layers_mut(&mut self) -> &mut LayerStack {
         &mut self.layers
     }
 
+    /// 指定图层（可变）。
     pub fn layer_mut(&mut self, id: LayerId) -> &mut Layer {
         self.layers.get_mut(id)
     }
 
+    /// 视口（只读）。
     pub fn viewport(&self) -> &Viewport {
         &self.viewport
     }
 
+    /// 视口（可变——引擎经 revision 检测变更）。
     pub fn viewport_mut(&mut self) -> &mut Viewport {
         &mut self.viewport
     }
 
+    /// 活动图层 id（空栈 panic——先 try_active）。
     pub fn active_layer(&self) -> LayerId {
         self.layers.active()
     }
 
+    /// 撤销历史（只读）。
     pub fn history(&self) -> &History {
         &self.history
     }
 
+    /// 撤销历史（可变）。
     pub fn history_mut(&mut self) -> &mut History {
         &mut self.history
     }
@@ -130,18 +144,22 @@ impl Document {
         self.tile_memory_bytes() + self.history.memory_used()
     }
 
+    /// 背景色。
     pub fn background(&self) -> Color {
         self.background
     }
 
+    /// 设置背景色。
     pub fn set_background(&mut self, c: Color) {
         self.background = c;
     }
 
+    /// 点阵网格开关。
     pub fn show_grid(&self) -> bool {
         self.show_grid
     }
 
+    /// 设置网格开关。
     pub fn set_show_grid(&mut self, on: bool) {
         self.show_grid = on;
     }
@@ -151,6 +169,7 @@ impl Document {
         self.history.push(group);
     }
 
+    /// 撤销（应用逆操作组）。
     pub fn undo(&mut self) -> bool {
         match self.history.pop_undo() {
             Some(g) => {
@@ -162,6 +181,7 @@ impl Document {
         }
     }
 
+    /// 重做。
     pub fn redo(&mut self) -> bool {
         match self.history.pop_redo() {
             Some(g) => {
@@ -202,6 +222,7 @@ impl Document {
         id
     }
 
+    /// 删除图层（入撤销）。
     pub fn remove_layer(&mut self, id: LayerId) -> bool {
         let Some((index, layer)) = self.layers.remove(id) else {
             return false;
@@ -213,6 +234,7 @@ impl Document {
         true
     }
 
+    /// 复制图层（入撤销）。
     pub fn duplicate_layer(&mut self, id: LayerId) -> Option<LayerId> {
         let new_id = self.layers.duplicate(id)?;
         self.commit(UndoGroup {

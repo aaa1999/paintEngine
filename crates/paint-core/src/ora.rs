@@ -53,6 +53,7 @@ pub struct OraLayer {
     pub blend_mode: BlendMode,
 }
 
+/// ORA 解析结果。
 pub struct OraDoc {
     pub w: u32,
     pub h: u32,

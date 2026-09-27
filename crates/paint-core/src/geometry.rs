@@ -8,6 +8,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// 创建矩形。
     pub fn new(x: i32, y: i32, w: u32, h: u32) -> Self {
         Self { x, y, w, h }
     }
@@ -17,14 +18,17 @@ impl Rect {
         self.x as i64 + self.w as i64
     }
 
+    /// 下边界（不含）。
     pub fn y2(&self) -> i64 {
         self.y as i64 + self.h as i64
     }
 
+    /// 零面积。
     pub fn is_empty(&self) -> bool {
         self.w == 0 || self.h == 0
     }
 
+    /// 交集；无交集返回 None。
     pub fn intersect(&self, o: &Rect) -> Option<Rect> {
         let x = self.x.max(o.x) as i64;
         let y = self.y.max(o.y) as i64;
@@ -42,6 +46,7 @@ impl Rect {
         }
     }
 
+    /// 并集包围盒。
     pub fn union(&self, o: &Rect) -> Rect {
         if self.is_empty() {
             return *o;

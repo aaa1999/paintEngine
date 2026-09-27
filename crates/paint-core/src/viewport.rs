@@ -19,7 +19,9 @@ pub struct Viewport {
     rev: u64,
 }
 
+/// 最小缩放（1/32）。
 pub const MIN_ZOOM: f64 = 1.0 / 32.0;
+/// 最大缩放（64x）。
 pub const MAX_ZOOM: f64 = 64.0;
 
 impl Default for Viewport {
@@ -29,6 +31,7 @@ impl Default for Viewport {
 }
 
 impl Viewport {
+    /// 创建恒等视口（zoom=1，pan=0）。
     pub fn new() -> Self {
         Self {
             zoom: 1.0,
@@ -40,10 +43,12 @@ impl Viewport {
         }
     }
 
+    /// 旋转角（弧度）。
     pub fn rotation(&self) -> f64 {
         self.rotation
     }
 
+    /// 水平翻转状态。
     pub fn flip_x(&self) -> bool {
         self.flip_x
     }
@@ -93,18 +98,22 @@ impl Viewport {
         (if self.flip_x { -rx } else { rx }, ry)
     }
 
+    /// 变更计数（引擎检测外部视口修改触发重绘）。
     pub fn revision(&self) -> u64 {
         self.rev
     }
 
+    /// 缩放倍率。
     pub fn zoom(&self) -> f64 {
         self.zoom
     }
 
+    /// 平移偏移（屏幕物理像素）。
     pub fn pan(&self) -> (f64, f64) {
         (self.pan_x, self.pan_y)
     }
 
+    /// 平移累积。
     pub fn pan_by(&mut self, dx: f64, dy: f64) {
         self.pan_x += dx;
         self.pan_y += dy;
@@ -122,6 +131,7 @@ impl Viewport {
         self.rev += 1;
     }
 
+    /// 设置缩放（钳制范围）。
     pub fn set_zoom(&mut self, zoom: f64) {
         let z = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
         if z != self.zoom {

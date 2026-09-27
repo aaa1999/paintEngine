@@ -127,6 +127,8 @@ pub struct WgpuRenderer {
 }
 
 impl WgpuRenderer {
+    /// 创建 GPU 渲染器（wgpu 设备初始化）。
+    /// 返回 None = 无可用 GPU（宿主应回退 SoftwareRenderer）。
     pub fn new() -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

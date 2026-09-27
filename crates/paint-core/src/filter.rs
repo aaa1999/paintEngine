@@ -28,6 +28,7 @@ pub enum Filter {
 }
 
 impl Filter {
+    /// 滤镜名。
     pub fn name(&self) -> &'static str {
         match self {
             Filter::Blur { .. } => "模糊",

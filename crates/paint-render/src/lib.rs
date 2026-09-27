@@ -23,9 +23,14 @@ use paint_core::tile::TileGrid;
 
 /// 纯 CPU 渲染器。
 #[derive(Default)]
+/// 纯 CPU 软件渲染器。
+///
+/// 全功能实现（盖章/合成/合并/滤镜），全平台零依赖。与 GPU 后端
+/// 逐像素对齐（见 paint-gpu 的 parity 测试）。
 pub struct SoftwareRenderer;
 
 impl SoftwareRenderer {
+    /// 创建（无状态，开销为零）。
     pub fn new() -> Self {
         Self
     }

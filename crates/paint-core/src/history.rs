@@ -47,6 +47,7 @@ impl std::fmt::Debug for UndoGroup {
 }
 
 impl UndoGroup {
+    /// 近似内存占用。
     pub fn bytes(&self) -> usize {
         self.ops.iter().map(|op| op.approx_bytes()).sum()
     }
@@ -110,6 +111,7 @@ pub struct History {
 }
 
 impl History {
+    /// 指定内存限额创建。
     pub fn new(memory_limit: usize) -> Self {
         Self {
             undo: Vec::new(),
@@ -135,6 +137,7 @@ impl History {
         self.evict();
     }
 
+    /// 弹出撤销组（应用由调用方执行）。
     pub fn pop_undo(&mut self) -> Option<UndoGroup> {
         self.undo.pop()
     }
@@ -144,31 +147,38 @@ impl History {
         self.undo.push(group);
     }
 
+    /// 压入重做栈。
     pub fn push_redo(&mut self, group: UndoGroup) {
         self.redo.push(group);
     }
 
+    /// 弹出重做组。
     pub fn pop_redo(&mut self) -> Option<UndoGroup> {
         self.redo.pop()
     }
 
+    /// 调整限额（可能触发淘汰）。
     pub fn set_memory_limit(&mut self, limit: usize) {
         self.limit = limit;
         self.evict();
     }
 
+    /// 限额（字节）。
     pub fn memory_limit(&self) -> usize {
         self.limit
     }
 
+    /// 当前占用（字节，近似）。
     pub fn memory_used(&self) -> usize {
         Self::total_bytes(&self.undo) + Self::total_bytes(&self.redo)
     }
 
+    /// 撤销深度。
     pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
 
+    /// 重做深度。
     pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
@@ -190,6 +200,7 @@ impl StrokeRecorder {
         }
     }
 
+    /// 目标图层 id。
     pub fn layer(&self) -> LayerId {
         self.layer
     }
@@ -201,6 +212,7 @@ impl StrokeRecorder {
         }
     }
 
+    /// 完成采集，产出撤销组。
     pub fn finish(self, label: &'static str) -> UndoGroup {
         UndoGroup {
             label,

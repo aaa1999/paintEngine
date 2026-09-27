@@ -5,10 +5,12 @@ use crate::tile::TileGrid;
 pub struct LayerId(u64);
 
 impl LayerId {
+    /// 转 u64（序列化用）。
     pub fn to_raw(self) -> u64 {
         self.0
     }
 
+    /// 从 u64 构造。
     pub fn from_raw(v: u64) -> Self {
         LayerId(v)
     }
@@ -43,6 +45,7 @@ impl Default for LayerAdjustment {
 }
 
 impl LayerAdjustment {
+    /// 调整参数全为零（无效果）。
     pub fn is_identity(&self) -> bool {
         self.brightness == 0.0 && self.contrast == 0.0 && self.saturation == 0.0 && self.hue == 0.0
     }
@@ -185,6 +188,7 @@ impl BlendMode {
         BlendMode::Exclusion,
     ];
 
+    /// 混合模式名（中文）。
     pub fn name(&self) -> &'static str {
         match self {
             BlendMode::Normal => "正常",
@@ -222,6 +226,7 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// 新建图层。
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -348,10 +353,12 @@ impl LayerStack {
         Some(new_id)
     }
 
+    /// 栈位置（0 = 底层）。
     pub fn position(&self, id: LayerId) -> Option<usize> {
         self.entries.iter().position(|e| e.id == id)
     }
 
+    /// 按 id 取图层（不存在 panic）。
     pub fn get(&self, id: LayerId) -> &Layer {
         self.try_get(id).expect("图层不存在（调用方保证）")
     }
@@ -361,6 +368,7 @@ impl LayerStack {
         self.position(id).map(|p| &self.entries[p].layer)
     }
 
+    /// 按 id 取可变图层（不存在 panic）。
     pub fn get_mut(&mut self, id: LayerId) -> &mut Layer {
         self.try_get_mut(id).expect("图层不存在（调用方保证）")
     }
@@ -371,28 +379,34 @@ impl LayerStack {
         Some(&mut self.entries[p].layer)
     }
 
+    /// 图层是否存在。
     pub fn contains(&self, id: LayerId) -> bool {
         self.entries.iter().any(|e| e.id == id)
     }
 
+    /// 活动图层 id（空栈 panic）。
     pub fn active(&self) -> LayerId {
         self.active
             .expect("空图层栈没有活动图层（调用方应先 try_active）")
     }
 
+    /// 活动图层 id（空栈 None）。
     pub fn try_active(&self) -> Option<LayerId> {
         self.active
     }
 
+    /// 设置活动图层。
     pub fn set_active(&mut self, id: LayerId) {
         assert!(self.contains(id), "图层不存在");
         self.active = Some(id);
     }
 
+    /// 图层数。
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// 空栈。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
