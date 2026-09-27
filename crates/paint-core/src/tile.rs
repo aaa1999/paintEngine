@@ -57,7 +57,7 @@ impl TileData {
     }
 
     pub fn is_transparent(&self) -> bool {
-        self.px.chunks_exact(4).all(|p| p[3] == 0)
+        self.px.as_chunks::<4>().0.iter().all(|p| p[3] == 0)
     }
 }
 

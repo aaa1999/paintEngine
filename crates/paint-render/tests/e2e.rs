@@ -53,7 +53,9 @@ fn ink_span(frame: &[u8], w: u32, y: u32) -> (u32, u32) {
 
 fn ink_count(frame: &[u8]) -> usize {
     frame
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] < 128 && p[3] == 255)
         .count()
 }

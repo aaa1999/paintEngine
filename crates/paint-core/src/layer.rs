@@ -49,6 +49,12 @@ pub struct LayerStack {
     active: Option<LayerId>,
 }
 
+impl Default for LayerStack {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LayerStack {
     pub fn new() -> Self {
         Self {

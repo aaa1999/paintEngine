@@ -180,9 +180,12 @@ mod tests {
 
     #[test]
     fn spacing_splits_line() {
-        let mut brush = RoundBrush::default();
-        brush.smoothing = 0.0; // 测试确定性
-        brush.size = 10.0; // 半径 5，步长 0.15*10 = 1.5px
+        // 测试确定性：关平滑；半径 5，步长 0.15*10 = 1.5px
+        let brush = RoundBrush {
+            smoothing: 0.0,
+            size: 10.0,
+            ..RoundBrush::default()
+        };
         let mut st = StrokeState::new(0.0, 0.0, 5.0);
         let first = StrokeGen::begin(&brush, &mut st, &sample(10.0, Some(1.0)));
         assert_eq!(first.len(), 1);
@@ -202,9 +205,11 @@ mod tests {
 
     #[test]
     fn pressure_maps_radius() {
-        let mut brush = RoundBrush::default();
-        brush.smoothing = 0.0;
-        brush.size = 20.0;
+        let brush = RoundBrush {
+            smoothing: 0.0,
+            size: 20.0,
+            ..RoundBrush::default()
+        };
         let mut st = StrokeState::new(0.0, 0.0, 10.0);
         StrokeGen::begin(&brush, &mut st, &sample(0.0, Some(0.25)));
         assert!((st_radius_hint(&st) - 2.5).abs() < 1e-4);
