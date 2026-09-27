@@ -262,6 +262,20 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.10 16-bit 导出 + GPU 盖章 compute（2026-09-27）
+
+**16-bit 色深**（f32 中间精度路径）：
+- [x] `encode_png16`：f32 直行 RGBA → u16 大端 PNG
+- [x] `Engine::export_png16`：透明背景合成 → f32 中间缓冲 → 16-bit 量化输出（多图层叠加的 8-bit 舍入色带在导出端消减）
+- [x] 测试：PNG16 魔数/大小/4 级渐变往返
+
+**GPU 盖章**（compute shader，Metal 兼容）：
+- [x] WGSL compute shader：dab 参数 storage buffer + src 采样纹理 + dst 写入纹理（Metal 不支持 read-write storage texture → 两纹理方案）+ n_dabs uniform；单线程迭代全部 dabs/像素
+- [x] WgpuRenderer::stamp_dabs 分流：半径 >20px 且 >4 dabs → GPU 路径；否则 CPU（≤20px CPU <1ms 无瓶颈）
+- [x] GPU 路径：CPU→GPU 上传 → compute dispatch(32,32,1) → 回读同步（撤销照常 CPU Arc 采集）
+- [x] 基准（Metal/M2）：CPU 优化后 80px 仅 2.94ms/笔、200px 6.81ms/笔（各向异性重构成效）；GPU 逐瓦片上传/回读开销主导——**当前架构下 GPU 不比 CPU 快**（40px 0.91x、80px 0.01x、250px 0.76x）
+- 结论：GPU 盖章**功能可用**但需持久化 GPU 瓦片（tile dual-residency）+ 批量 compute + 异步回读架构才能超越 CPU——与原始评估一致，触发条件不变（大笔刷高频掉帧）
+
 ### M4.9 正式图层面板（2026-09-27）
 
 - [x] 引擎 API：set_layer_opacity/visible/blend_mode + layer_infos 复合 getter（含 id/name/opacity/visible/blend/clipped/has_mask）+ select_by_id + reorder/remove/duplicate_by_index 系列

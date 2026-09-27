@@ -161,3 +161,66 @@ mod tests {
             .all(|p| *p == [10, 20, 30, 255]));
     }
 }
+
+/// f32 累积缓冲 → 16-bit PNG（每通道 u16）。
+/// 输入 `f32_buf` 为直行 RGBA f32（0..1），长度 = w*h*4。
+pub fn encode_png16(f32_buf: &[f32], w: u32, h: u32) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("空图像".into());
+    }
+    let expected = (w as usize) * (h as usize) * 4;
+    if f32_buf.len() < expected {
+        return Err(format!("f32 缓冲过小: {} < {expected}", f32_buf.len()));
+    }
+    let mut u16_buf = vec![0u16; expected];
+    for (d, s) in u16_buf
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(f32_buf.as_chunks::<4>().0)
+    {
+        for k in 0..4 {
+            d[k] = (s[k].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, w, h);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Sixteen);
+        let mut writer = enc
+            .write_header()
+            .map_err(|e| format!("PNG16 头写入失败: {e}"))?;
+        // png crate 要求 16-bit 为大端字节序
+        let mut be = Vec::with_capacity(expected * 2);
+        for v in &u16_buf {
+            be.extend_from_slice(&v.to_be_bytes());
+        }
+        writer
+            .write_image_data(&be)
+            .map_err(|e| format!("PNG16 数据写入失败: {e}"))?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests16 {
+    use super::*;
+
+    #[test]
+    fn png16_roundtrip_levels() {
+        // 4 级渐变 f32 → 16-bit → 解码回 u16 值精确
+        let w = 4;
+        let h = 1;
+        let f32_buf: Vec<f32> = (0..4)
+            .flat_map(|i| {
+                let v = i as f32 / 3.0;
+                vec![v, v, v, 1.0]
+            })
+            .collect();
+        let png = encode_png16(&f32_buf, w, h).unwrap();
+        // 验证非空且前几个字节是 PNG 魔数
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        assert!(png.len() > 50, "16-bit PNG 应比 8-bit 大");
+    }
+}

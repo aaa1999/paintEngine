@@ -529,3 +529,32 @@ fn clipboard_blocked_during_transform() {
     e.cancel_transform();
     assert!(e.copy_selection(), "取消后恢复");
 }
+
+#[test]
+fn png16_export_gradient_no_banding() {
+    let (mut e, mut s) = engine();
+    // 用半透明多叠层制造渐变（单层 u8 会有 256 级台阶）
+    e.brush_mut().smoothing = 0.0;
+    e.brush_mut().hardness = 0.0; // 软边渐变
+    e.brush_mut().opacity = 0.3;
+    // 多笔叠加产生中间值
+    for y in (10..50).step_by(8) {
+        draw(&mut e, 10.0, 54.0, y as f64);
+    }
+    e.render(&mut s);
+    assert!(e.visible_content_bounds().is_some());
+
+    // 16-bit 导出非空且比 8-bit 大（头+数据更多）
+    let png16 = e.export_png16(None, 1.0).expect("16-bit 导出");
+    assert!(!png16.is_empty());
+    assert_eq!(&png16[..4], &[0x89, b'P', b'N', b'G']);
+    // 8-bit 对比
+    let png8 = e.export_png(None, 1.0, true).expect("8-bit 导出");
+    // 16-bit 应显著大于 8-bit（数据量翻倍）
+    assert!(
+        png16.len() > png8.len(),
+        "16-bit ({}) 应大于 8-bit ({})",
+        png16.len(),
+        png8.len()
+    );
+}

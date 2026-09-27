@@ -90,6 +90,7 @@ fn bench(name: &str, mut f: impl FnMut(&mut [u8])) -> f64 {
 
 fn main() {
     bench_stamp();
+    bench_gpu_stamp();
     let (w, h) = (2560u32, 1440u32);
     let full = Rect::new(0, 0, w, h);
 
@@ -155,6 +156,58 @@ fn bench_stamp() {
         println!(
             "size={size:>5.0} 半径={radius:>5.1} {n_dabs:>5} dabs/笔 → 总 {total:>7.2} ms，帧均({hz}Hz) {:+.2} ms",
             total * hz as f64 / 120.0
+        );
+    }
+}
+
+/// GPU vs CPU 盖章对比（大笔刷场景）。
+fn bench_gpu_stamp() {
+    use paint_core::render::Renderer;
+    use paint_core::stroke::DabMode;
+    println!("\n── GPU 盖章 vs CPU（大笔刷）──");
+    for &size in &[40f32, 80.0, 150.0, 250.0] {
+        let radius = size / 2.0;
+        let n = 30; // 30 dabs
+        let dabs: Vec<Dab> = (0..n)
+            .map(|i| Dab {
+                x: 200.0 + i as f64 * radius as f64 * 0.3,
+                y: 500.0,
+                radius,
+                hardness: 0.5,
+                color: Color::BLACK,
+                alpha: 1.0,
+                mode: DabMode::Buildup,
+                erase: false,
+                tip: None,
+                scatter: 0.0,
+                aspect: 1.0,
+                angle: 0.0,
+            })
+            .collect();
+
+        let mut grid = paint_core::tile::TileGrid::new();
+        let mut rec = paint_core::history::StrokeRecorder::new(paint_core::LayerId::from_raw(0));
+        // CPU 预热
+        paint_render::stamp_dabs(&mut grid, &dabs[..1], None, &mut rec);
+        let t0 = std::time::Instant::now();
+        paint_render::stamp_dabs(&mut grid, &dabs, None, &mut rec);
+        let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // GPU
+        let Some(mut gpu) = paint_gpu::WgpuRenderer::new() else {
+            println!("GPU 不可用");
+            return;
+        };
+        let mut grid2 = paint_core::tile::TileGrid::new();
+        let mut rec2 = paint_core::history::StrokeRecorder::new(paint_core::LayerId::from_raw(0));
+        // 预热（触发管线创建）
+        let t0 = std::time::Instant::now();
+        gpu.stamp_dabs(&mut grid2, &dabs, None, &mut rec2);
+        let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        println!(
+            "size={size:>5.0} 半径={radius:>5.1} {n} dabs → CPU {cpu_ms:>7.2} ms · GPU {gpu_ms:>7.2} ms（{:.2}x）",
+            if gpu_ms > 0.0 { cpu_ms / gpu_ms } else { 0.0 }
         );
     }
 }

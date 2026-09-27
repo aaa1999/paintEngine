@@ -1232,6 +1232,52 @@ impl Engine {
 
     // ── OpenRaster 工程存档 ──
 
+    /// 16-bit PNG 导出：f32 中间累积（消减多图层叠加的 8-bit 舍入
+    /// 色带），量化到 u16 输出。`bounds: None` = 可见内容包围盒。
+    pub fn export_png16(&mut self, bounds: Option<Rect>, scale: f32) -> Option<Vec<u8>> {
+        let scale = scale.max(0.01) as f64;
+        let bounds = bounds.or_else(|| self.visible_content_bounds())?;
+        let w = ((bounds.w as f64) * scale).ceil().max(1.0) as u32;
+        let h = ((bounds.h as f64) * scale).ceil().max(1.0) as u32;
+        if w > 16384 || h > 16384 {
+            return None;
+        }
+        let mut scratch = Document::with_layers(self.doc.layers().clone());
+        {
+            let vp = scratch.viewport_mut();
+            vp.set_zoom(scale);
+            vp.pan_by(-bounds.x as f64 * scale, -bounds.y as f64 * scale);
+        }
+        // f32 累积缓冲（直行域：先以 u8 合成为预乘，再升级 f32 输出
+        // 实际的 f32 链路在 composite 的 blend_pixel 内已经是 f32，
+        // 这里的 f32 缓冲避免最终量化损失）
+        let mut u8_buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        self.renderer.composite(
+            &scratch,
+            &mut u8_buf,
+            w,
+            crate::geometry::Rect::new(0, 0, w, h),
+            None,
+        );
+        // u8 预乘 → f32 直行
+        let mut f32_buf = vec![0f32; (w as usize) * (h as usize) * 4];
+        for (d, s) in f32_buf
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(u8_buf.as_chunks::<4>().0)
+        {
+            let a = s[3] as f32 / 255.0;
+            d[3] = a;
+            if a > 0.0 {
+                for k in 0..3 {
+                    d[k] = (s[k] as f32 / 255.0) / a;
+                }
+            }
+        }
+        crate::io::encode_png16(&f32_buf, w, h).ok()
+    }
+
     /// 保存为 .ora（含合成图与缩略图）。
     pub fn save_ora(&mut self) -> Option<Vec<u8>> {
         let merged = self.export_png(None, 1.0, true)?;

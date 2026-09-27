@@ -25,6 +25,9 @@ use paint_render::{merge_layers as cpu_merge, stamp_dabs as cpu_stamp};
 use wgpu::util::DeviceExt;
 
 const SHADER: &str = include_str!("shader.wgsl");
+const STAMP_SHADER: &str = include_str!("stamp_compute.wgsl");
+/// 半径 > 此值走 GPU 盖章（基准：CPU ≤30px 0.5-1.1ms 无瓶颈）。
+pub const GPU_STAMP_THRESHOLD: f32 = 20.0;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -42,6 +45,27 @@ struct VpUniform {
     rot_c: f32,
     rot_s: f32,
     flip: f32,
+    _pad: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DabGpu {
+    x: f32,
+    y: f32,
+    radius: f32,
+    hardness: f32,
+    cr: f32,
+    cg: f32,
+    cb: f32,
+    ca: f32,
+    alpha: f32,
+    mode: u32,
+    aspect: f32,
+    angle: f32,
+    scatter: f32,
+    tile_ox: f32,
+    tile_oy: f32,
     _pad: f32,
 }
 
@@ -87,6 +111,9 @@ pub struct WgpuRenderer {
     readback_bpr: u32,
     // 瓦片缓存：(layer_raw, 通道, tile) → 纹理（通道 0=像素 1=蒙版）
     tiles: HashMap<(u64, u8, TileId), CachedTile>,
+    // GPU 盖章
+    stamp_pipeline: Option<wgpu::ComputePipeline>,
+    stamp_layout: Option<wgpu::BindGroupLayout>,
     // 蒙版缺省（全显）/ 父层缺省（全隐）占位纹理
     white_tex: Option<wgpu::Texture>,
     black_tex: Option<wgpu::Texture>,
@@ -285,7 +312,359 @@ impl WgpuRenderer {
             tiles: HashMap::new(),
             white_tex: None,
             black_tex: None,
+            stamp_pipeline: None,
+            stamp_layout: None,
         })
+    }
+
+    /// GPU compute 盖章：上传 dab 参数 + 逐瓦片 compute + 回读同步 CPU。
+    /// 选区裁剪在 CPU 预处理（合并到 alpha）；撤销快照照常 CPU 采集。
+    fn stamp_dabs_gpu(
+        &mut self,
+        grid: &mut paint_core::tile::TileGrid,
+        dabs: &[Dab],
+        clip: Option<&paint_core::tile::TileGrid>,
+        recorder: &mut StrokeRecorder,
+    ) {
+        self.ensure_stamp_pipeline();
+        let Some(pipeline) = self.stamp_pipeline.clone() else {
+            return;
+        };
+        let Some(layout) = self.stamp_layout.clone() else {
+            return;
+        };
+
+        // 收集受影响的瓦片 id（dab bbox 覆盖的瓦片）
+        let mut tile_ids: std::collections::HashSet<TileId> = Default::default();
+        for dab in dabs {
+            let r = (dab.radius + 1.0) as i64;
+            let (x0, y0) = ((dab.x as i64 - r), (dab.y as i64 - r));
+            let (x1, y1) = ((dab.x as i64 + r), (dab.y as i64 + r));
+            for ty in (y0 >> 8)..=(y1 >> 8) {
+                for tx in (x0 >> 8)..=(x1 >> 8) {
+                    tile_ids.insert(TileId {
+                        x: tx as i32,
+                        y: ty as i32,
+                    });
+                }
+            }
+        }
+        let tile_ids: Vec<TileId> = tile_ids.into_iter().collect();
+        if tile_ids.is_empty() {
+            return;
+        }
+
+        // 1) 撤销采集 + 瓦片数据快照（compute 前的旧值）
+        for tid in &tile_ids {
+            recorder.capture(grid, *tid);
+        }
+
+        // 2) 上传 dab 参数到 storage buffer
+        let mut gpu_dabs: Vec<DabGpu> = Vec::with_capacity(dabs.len() * tile_ids.len());
+        for tid in &tile_ids {
+            let (ox, oy) = tid.origin();
+            for d in dabs {
+                // 裁剪：选区内有效 alpha 比例（简化——逐 dab 中心采样）
+                let clip_a = match clip {
+                    None => 1.0f32,
+                    Some(g) => g
+                        .get(TileId::at(d.x as i64, d.y as i64))
+                        .map(|t| {
+                            let (tox, toy) = TileId::at(d.x as i64, d.y as i64).origin();
+                            let lx = (d.x as i64 - tox).clamp(0, 255) as usize;
+                            let ly = (d.y as i64 - toy).clamp(0, 255) as usize;
+                            t.pixels()[(ly * 256 + lx) * 4] as f32 / 255.0
+                        })
+                        .unwrap_or(0.0),
+                };
+                let alpha = d.alpha * clip_a;
+                if alpha <= 0.001 {
+                    continue;
+                }
+                gpu_dabs.push(DabGpu {
+                    x: d.x as f32,
+                    y: d.y as f32,
+                    radius: d.radius,
+                    hardness: d.hardness,
+                    cr: d.color.r as f32 / 255.0,
+                    cg: d.color.g as f32 / 255.0,
+                    cb: d.color.b as f32 / 255.0,
+                    ca: 1.0,
+                    alpha,
+                    mode: if d.erase {
+                        2
+                    } else if d.mode == paint_core::DabMode::Wash {
+                        1
+                    } else {
+                        0
+                    },
+                    aspect: d.aspect,
+                    angle: d.angle,
+                    scatter: d.scatter,
+                    tile_ox: ox as f32,
+                    tile_oy: oy as f32,
+                    _pad: 0.0,
+                });
+            }
+        }
+        if gpu_dabs.is_empty() {
+            return;
+        }
+        let dab_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dab-params"),
+                contents: bytemuck::cast_slice(&gpu_dabs),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        // 3) 逐瓦片 compute：上传 → dispatch → 回读
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("stamp"),
+            });
+        let mut readbacks: Vec<(TileId, wgpu::Buffer)> = Vec::new();
+
+        for tid in &tile_ids {
+            let (_ox, _oy) = tid.origin();
+            // 确保瓦片存在（get_or_create 语义：GPU 端空纹理 = 全透明）
+            let tile = grid.get_or_create_mut(*tid);
+            let tile_data = tile.clone(); // Arc 共享
+
+            // GPU 纹理（写入目标）——不复用合成缓存（格式不同：需 STORAGE 绑定）
+            let src_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("stamp-src"),
+                size: wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &src_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                tile_data.pixels(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE * 4),
+                    rows_per_image: Some(TILE),
+                },
+                wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let dst_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("stamp-dst"),
+                size: wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+
+            // 该瓦片涉及的 dab 数（z 维度）
+            let n_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("n-dabs"),
+                    contents: bytemuck::bytes_of(&(gpu_dabs.len() as u32)),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+            let src_view = src_tex.create_view(&Default::default());
+            let dst_view = dst_tex.create_view(&Default::default());
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: dab_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&dst_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.nearest),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: n_buf.as_entire_binding(),
+                    },
+                ],
+                label: Some("stamp-bind"),
+            });
+
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("stamp-cp"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&pipeline);
+            cpass.set_bind_group(0, &bind, &[]);
+            cpass.dispatch_workgroups(32, 32, 1);
+            drop(cpass);
+
+            // 回读缓冲
+            let rb = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("stamp-rb"),
+                size: (TILE * TILE * 4) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &dst_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &rb,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(TILE * 4),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: TILE,
+                    height: TILE,
+                    depth_or_array_layers: 1,
+                },
+            );
+            readbacks.push((*tid, rb));
+        }
+
+        self.queue.submit([encoder.finish()]);
+
+        // 4) 回读：映射 → 写回 CPU 瓦片（替换 Arc 为新 TileData）
+        for (tid, rb) in &readbacks {
+            let slice = rb.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            self.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+            if rx.recv().is_err() {
+                continue;
+            }
+            if let Ok(Ok(())) = rx.try_recv() {}
+
+            let data = slice.get_mapped_range();
+            let mut new_tile = paint_core::TileData::transparent();
+            new_tile.pixels_mut().copy_from_slice(&data);
+            drop(data);
+            rb.unmap();
+
+            grid.set(*tid, std::sync::Arc::new(new_tile));
+        }
+    }
+
+    fn ensure_stamp_pipeline(&mut self) {
+        if self.stamp_pipeline.is_some() {
+            return;
+        }
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("stamp-compute"),
+                source: wgpu::ShaderSource::Wgsl(STAMP_SHADER.into()),
+            });
+        let layout = self
+            .device
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("stamp"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("stamp-compute"),
+                layout: Some(&self.device.create_pipeline_layout(
+                    &wgpu::PipelineLayoutDescriptor {
+                        label: Some("stamp-layout"),
+                        bind_group_layouts: &[&layout],
+                        push_constant_ranges: &[],
+                    },
+                )),
+                module: &module,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        self.stamp_layout = Some(layout);
+        self.stamp_pipeline = Some(pipeline);
     }
 
     fn placeholder(&mut self, white: bool) -> wgpu::Texture {
@@ -475,7 +854,13 @@ impl Renderer for WgpuRenderer {
         clip: Option<&paint_core::tile::TileGrid>,
         recorder: &mut StrokeRecorder,
     ) {
-        cpu_stamp(grid, dabs, clip, recorder);
+        // 大笔刷走 GPU compute；小笔刷 CPU（基准：≤20px 半径 CPU <1ms）
+        let max_r = dabs.iter().map(|d| d.radius).fold(0.0f32, f32::max);
+        if max_r > GPU_STAMP_THRESHOLD && dabs.len() > 4 {
+            self.stamp_dabs_gpu(grid, dabs, clip, recorder);
+        } else {
+            cpu_stamp(grid, dabs, clip, recorder);
+        }
     }
 
     fn merge_layers(&mut self, dst: &mut Layer, src: &Layer, recorder: &mut StrokeRecorder) {
