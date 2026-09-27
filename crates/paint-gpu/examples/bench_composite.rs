@@ -24,6 +24,8 @@ fn dab(x: f64, y: f64, r: f32, c: Color) -> Dab {
         erase: false,
         tip: None,
         scatter: 0.0,
+        aspect: 1.0,
+        angle: 0.0,
     }
 }
 
@@ -140,6 +142,8 @@ fn bench_stamp() {
                 erase: false,
                 tip: None,
                 scatter: 0.0,
+                aspect: 1.0,
+                angle: 0.0,
             })
             .collect();
         let mut rec = paint_core::history::StrokeRecorder::new(paint_core::LayerId::from_raw(0));

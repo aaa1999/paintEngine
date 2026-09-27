@@ -75,7 +75,8 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeResize
     }
 }
 
-/// `pressure < 0` 表示无压感（手指/鼠标按满压处理）。
+/// `pressure < 0` 表示无压感（手指/鼠标按满压处理）；
+/// `tilt_x/tilt_y = NaN` 表示无倾斜数据。
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePointer(
@@ -87,6 +88,8 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePointe
     x: jdouble,
     y: jdouble,
     pressure: jdouble,
+    tilt_x: jdouble,
+    tilt_y: jdouble,
     kind: jint,
     t_us: jlong,
 ) {
@@ -110,7 +113,11 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePointe
         } else {
             Some(ppressure(pressure))
         },
-        tilt: None, // M3 后续：getAxisValue(MOTION_EVENT_AXIS_TILT) 接入
+        tilt: if tilt_x.is_finite() && tilt_y.is_finite() {
+            Some((tilt_x as f32, tilt_y as f32))
+        } else {
+            None
+        },
         kind,
         id: id as u64,
         t_us: t_us.max(0) as u64,

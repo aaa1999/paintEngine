@@ -131,6 +131,56 @@ impl App {
             .handle_event(PlatformEvent::Resize { w, h, scale });
     }
 
+    /// 数字键 1-9 快捷色板。
+    fn set_palette(&mut self, idx: usize) {
+        const PALETTE: [paint_core::Color; 9] = [
+            paint_core::Color { r: 0, g: 0, b: 0 },
+            paint_core::Color {
+                r: 255,
+                g: 255,
+                b: 255,
+            },
+            paint_core::Color {
+                r: 220,
+                g: 50,
+                b: 47,
+            },
+            paint_core::Color {
+                r: 230,
+                g: 145,
+                b: 56,
+            },
+            paint_core::Color {
+                r: 241,
+                g: 196,
+                b: 15,
+            },
+            paint_core::Color {
+                r: 40,
+                g: 167,
+                b: 69,
+            },
+            paint_core::Color {
+                r: 32,
+                g: 201,
+                b: 151,
+            },
+            paint_core::Color {
+                r: 0,
+                g: 123,
+                b: 255,
+            },
+            paint_core::Color {
+                r: 150,
+                g: 68,
+                b: 255,
+            },
+        ];
+        let c = PALETTE[idx];
+        self.engine.brush_mut().color = c;
+        println!("颜色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
+    }
+
     fn dragging_stroke_modifier(&self) -> bool {
         false
     }
@@ -254,7 +304,7 @@ impl ApplicationHandler for App {
             return;
         }
         let attrs = Window::default_attributes().with_title(
-            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · R 旋转 · H 翻转 · Ctrl+R 复位 · Ctrl+S 存工程 · Ctrl+Z 撤销",
+            "paintEngine — 左键画/右键擦 · 空格/中键平移 · 滚轮缩放 · Ctrl+0 适应 · G 网格 · T 稳定器 · Y 倾斜笔 · R 旋转 · H 翻转 · Alt+点取色 · 1-9 色板 · Ctrl+S 存工程 · Ctrl+Z 撤销",
         );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -339,6 +389,15 @@ impl ApplicationHandler for App {
                         && self.dragging_stroke_modifier()
                     {
                         // 留给笔画（Ctrl+Z 等组合不受影响）——Ctrl 纯按住拖拽才选区
+                    }
+                    // Alt+点击 = 吸管取色
+                    if self.modifiers.alt_key() && !self.space_down {
+                        let (x, y) = (self.cursor.0 as u32, self.cursor.1 as u32);
+                        if let Some(c) = self.engine.pick_color(x, y) {
+                            self.engine.brush_mut().color = c;
+                            println!("取色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
+                        }
+                        return;
                     }
                     let ctrl_sel = self.modifiers.control_key() && !self.space_down;
                     if ctrl_sel {
@@ -466,6 +525,28 @@ impl ApplicationHandler for App {
                             "s" | "S" if ctrl => {
                                 self.save_ora();
                             }
+                            "y" | "Y" => {
+                                // tilt 笔刷灵敏度档位：0 → 50% → 100% → 0
+                                let cur = self.engine.brush().tilt_sensitivity;
+                                let next = if cur < 0.1 {
+                                    0.5
+                                } else if cur < 0.9 {
+                                    1.0
+                                } else {
+                                    0.0
+                                };
+                                self.engine.brush_mut().tilt_sensitivity = next;
+                                println!("笔倾斜灵敏度: {:.0}%", next * 100.0);
+                            }
+                            "1" if !ctrl => self.set_palette(0),
+                            "2" => self.set_palette(1),
+                            "3" => self.set_palette(2),
+                            "4" => self.set_palette(3),
+                            "5" => self.set_palette(4),
+                            "6" => self.set_palette(5),
+                            "7" => self.set_palette(6),
+                            "8" => self.set_palette(7),
+                            "9" => self.set_palette(8),
                             "d" | "D" if ctrl => {
                                 self.engine.clear_selection();
                             }

@@ -124,6 +124,20 @@ impl PaintApp {
         r
     }
 
+    /// 笔倾斜灵敏度 0..1（tilt 笔刷，书法效果）。
+    pub fn set_tilt_sensitivity(&self, v: f32) {
+        self.inner.borrow_mut().engine.brush_mut().tilt_sensitivity = v.clamp(0.0, 1.0);
+    }
+
+    /// 吸管取色（屏幕物理像素）。
+    pub fn pick_color(&self, x: u32, y: u32) -> Option<Vec<u8>> {
+        self.inner
+            .borrow()
+            .engine
+            .pick_color(x, y)
+            .map(|c| vec![c.r, c.g, c.b])
+    }
+
     pub fn set_stabilizer(&self, v: f32) {
         self.inner.borrow_mut().engine.brush_mut().stabilizer = v.clamp(0.0, 0.98);
     }

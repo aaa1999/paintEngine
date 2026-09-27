@@ -44,7 +44,8 @@ class PaintEngineView @JvmOverloads constructor(
     private external fun nativeResize(handle: Long, w: Int, h: Int, scale: Float)
     private external fun nativePointer(
         handle: Long, phase: Int, id: Int,
-        x: Double, y: Double, pressure: Double, kind: Int, tUs: Long,
+        x: Double, y: Double, pressure: Double,
+        tiltX: Double, tiltY: Double, kind: Int, tUs: Long,
     )
     private external fun nativePenInRange(handle: Long, inRange: Boolean)
     private external fun nativeFocus(handle: Long, focused: Boolean)
@@ -176,9 +177,22 @@ class PaintEngineView @JvmOverloads constructor(
         val pressure = if (kind == KIND_PEN || kind == KIND_ERASER) {
             e.getPressure(i).toDouble()
         } else -1.0
+        // 笔倾斜：AXIS_ORIENTATION（方位角）+ AXIS_TILT（离垂直倾角）
+        // → W3C tiltX/tiltY 投影；直立笔（tilt≈0）传 NaN
+        var tiltX = Double.NaN
+        var tiltY = Double.NaN
+        if (kind == KIND_PEN || kind == KIND_ERASER) {
+            val orientation = e.getAxisValue(MotionEvent.AXIS_ORIENTATION, i)
+            val tilt = e.getAxisValue(MotionEvent.AXIS_TILT, i)
+            if (tilt > 0.05) {
+                val tan = kotlin.math.tan(tilt)
+                tiltX = kotlin.math.atan(kotlin.math.cos(orientation) / tan).toDouble()
+                tiltY = kotlin.math.atan(kotlin.math.sin(orientation) / tan).toDouble()
+            }
+        }
         val x = if (hist >= 0) e.getHistoricalX(i, hist) else e.getX(i)
         val y = if (hist >= 0) e.getHistoricalY(i, hist) else e.getY(i)
-        nativePointer(handle, phase, e.getPointerId(i), x.toDouble(), y.toDouble(), pressure, kind, tMs * 1000)
+        nativePointer(handle, phase, e.getPointerId(i), x.toDouble(), y.toDouble(), pressure, tiltX, tiltY, kind, tMs * 1000)
     }
 
     // ── 控制面（Activity/工具栏调用）──

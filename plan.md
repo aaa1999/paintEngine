@@ -262,6 +262,11 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.5 体验补全（2026-09-27）
+
+- [x] 桌面取色器：Alt+点击画布吸管（读合成帧像素）+ 数字键 1-9 快捷色板 + 控制台回显十六进制；Web 端同步 Alt+点击吸管
+- [x] tilt 笔刷：笔倾斜→各向异性椭圆笔形（长轴 ⟂ 倾斜方向模拟笔尖排线），tilt_sensitivity 灵敏度调制、笔画间倾斜向量插值、纹理尖与橡皮同样生效；输入链路 Android AXIS_TILT/ORIENTATION→W3C tiltX/tiltY 投影接入（Web Pointer Events 原生支持）；桌面 Y 键/Web 滑杆调灵敏度
+
 ### M4（P2）：进阶能力 ✅（2026-09-27，GPU 盖章以基准数据决策推迟）
 
 - [ ] ~~GPU 盖章（compute shader dab）~~——**数据决策推迟**：CPU 盖章基准显示 ≤30px 笔刷仅 0.5–1.1ms/笔（无瓶颈），80px+ 大笔刷 26ms/笔是唯一痛点；而 GPU 盖章需重构瓦片权威模型（CPU COW 撤销 vs GPU 写入+回读同步），复杂度与收益不匹配。触发条件：实测大笔刷高频使用掉帧时，按"tile 双驻留 + compute"架构立项。

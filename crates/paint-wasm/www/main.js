@@ -49,6 +49,23 @@ $("stab").oninput = (e) => {
   app.set_stabilizer(v / 100);
   $("stabLabel").textContent = `稳定${v}%`;
 };
+$("tilt").oninput = (e) => {
+  const v = Number(e.target.value);
+  app.set_tilt_sensitivity(v / 100);
+  $("tiltLabel").textContent = `倾斜${v}%`;
+};
+// Alt+点击 = 吸管取色
+canvasEl().addEventListener("pointerdown", (e) => {
+  if (!e.altKey) return;
+  const c = app.pick_color(Math.round(e.clientX * devicePixelRatio), Math.round(e.clientY * devicePixelRatio));
+  if (c && c.length === 3) {
+    app.set_brush_color(c[0], c[1], c[2]);
+    const hex = "#" + c.map((v) => v.toString(16).padStart(2, "0")).join("");
+    document.getElementById("color").value = hex;
+    $("status").textContent = `取色 ${hex}`;
+  }
+});
+function canvasEl() { return document.getElementById("canvas"); }
 
 // 混合模式
 const blendSel = $("blend");

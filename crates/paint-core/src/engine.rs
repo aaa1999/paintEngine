@@ -116,6 +116,21 @@ impl Engine {
         &mut self.brush
     }
 
+    /// 吸管取色：读合成帧缓冲的屏幕像素（Alt+点击）。
+    pub fn pick_color(&self, x: u32, y: u32) -> Option<Color> {
+        let (w, h) = self.size;
+        if x >= w || y >= h {
+            return None;
+        }
+        let i = ((y * w + x) * 4) as usize;
+        let p = self.frame.get(i..i + 3)?;
+        Some(Color {
+            r: p[0],
+            g: p[1],
+            b: p[2],
+        })
+    }
+
     /// 设置纹理笔刷尖（PNG 字节；None 恢复圆头笔）。
     pub fn set_brush_tip(&mut self, png: Option<&[u8]>) -> bool {
         match png {

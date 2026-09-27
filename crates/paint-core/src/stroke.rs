@@ -56,6 +56,10 @@ pub struct Dab {
     pub tip: Option<std::sync::Arc<TipTexture>>,
     /// 尖图随机散布强度 0..1（相对半径的比例偏移，dab 坐标哈希定种子）。
     pub scatter: f32,
+    /// 各向异性：短轴/长轴半径比（1.0 = 圆形；tilt 笔刷 < 1）。
+    pub aspect: f32,
+    /// 长轴方向（弧度；长轴 ⟂ 笔倾斜方向，模拟笔尖排线）。
+    pub angle: f32,
 }
 
 /// 一笔的进行时状态（平滑位置、间距游标）。
@@ -65,6 +69,8 @@ pub struct StrokeState {
     smooth: (f64, f64),
     /// 最近一次原始样本位置（稳定器收笔追赶的目标）。
     raw: (f64, f64),
+    /// 插值中的倾斜向量（弧度分量，(0,0) = 笔直立无倾斜）。
+    tilt: (f32, f32),
     /// 上一个已发射 dab 的位置。
     since_dab: (f64, f64),
     last_radius: f32,
@@ -75,6 +81,7 @@ impl StrokeState {
         Self {
             smooth: (x, y),
             raw: (x, y),
+            tilt: (0.0, 0.0),
             since_dab: (x, y),
             last_radius: radius,
         }
@@ -123,6 +130,8 @@ pub struct RoundBrush {
     pub tip: Option<std::sync::Arc<TipTexture>>,
     /// 尖图散布强度 0..1。
     pub scatter: f32,
+    /// 笔倾斜灵敏度 0..1：倾斜→各向异性笔形（书法效果），0 关闭。
+    pub tilt_sensitivity: f32,
 }
 
 impl Default for RoundBrush {
@@ -140,6 +149,7 @@ impl Default for RoundBrush {
             mode: DabMode::Buildup,
             tip: None,
             scatter: 0.0,
+            tilt_sensitivity: 0.0,
         }
     }
 }
@@ -162,7 +172,19 @@ impl RoundBrush {
         }
     }
 
-    fn make_dab(&self, x: f64, y: f64, radius: f32) -> Dab {
+    fn make_dab(&self, x: f64, y: f64, radius: f32, tilt: (f32, f32)) -> Dab {
+        // 倾斜 → 各向异性：长轴 ⟂ 倾斜方向（笔尖排线），强度受灵敏度调制
+        let sens = self.tilt_sensitivity.clamp(0.0, 1.0);
+        let mag = ((tilt.0.hypot(tilt.1)) / (std::f32::consts::FRAC_PI_2)) * sens;
+        let mag = mag.clamp(0.0, 0.98);
+        let (aspect, angle) = if mag > 0.01 {
+            (
+                1.0 / (1.0 + mag * 1.5),
+                tilt.1.atan2(tilt.0) + std::f32::consts::FRAC_PI_2,
+            )
+        } else {
+            (1.0, 0.0)
+        };
         Dab {
             x,
             y,
@@ -174,6 +196,8 @@ impl RoundBrush {
             erase: false,
             tip: self.tip.clone(),
             scatter: self.scatter,
+            aspect,
+            angle,
         }
     }
 }
@@ -182,11 +206,14 @@ impl StrokeGen for RoundBrush {
     fn begin(&self, state: &mut StrokeState, sample: &PointerSample) -> Vec<Dab> {
         let r = self.radius_at(sample.pressure);
         *state = StrokeState::new(sample.x, sample.y, r);
-        vec![self.make_dab(sample.x, sample.y, r)]
+        state.tilt = sample.tilt.unwrap_or((0.0, 0.0));
+        let tilt = state.tilt;
+        vec![self.make_dab(sample.x, sample.y, r, tilt)]
     }
 
     fn extend(&self, state: &mut StrokeState, sample: &PointerSample) -> Vec<Dab> {
         state.raw = (sample.x, sample.y);
+        let tilt_target = sample.tilt.unwrap_or((0.0, 0.0));
         // 稳定器与轻平滑叠加：stabilizer 主导时每事件只前进 (1-stab) 比例，
         // 高频输入下表现为强磁吸；收笔由 end() 直线追赶补齐
         let stab = self.stabilizer.clamp(0.0, 0.98) as f64;
@@ -199,6 +226,7 @@ impl StrokeGen for RoundBrush {
         let (mut px, mut py) = state.since_dab;
         let mut radius = state.last_radius;
 
+        let mut tilt = state.tilt;
         loop {
             let step = (self.spacing * (radius + target)).max(0.75) as f64;
             let dx = state.smooth.0 - px;
@@ -211,8 +239,11 @@ impl StrokeGen for RoundBrush {
             px = lerp(px, state.smooth.0, f);
             py = lerp(py, state.smooth.1, f);
             radius = lerp(radius as f64, target as f64, f) as f32;
-            dabs.push(self.make_dab(px, py, radius));
+            tilt.0 = tilt.0 + (tilt_target.0 - tilt.0) * f as f32;
+            tilt.1 = tilt.1 + (tilt_target.1 - tilt.1) * f as f32;
+            dabs.push(self.make_dab(px, py, radius, tilt));
         }
+        state.tilt = tilt;
 
         state.since_dab = (px, py);
         state.last_radius = radius;
@@ -237,9 +268,9 @@ impl StrokeGen for RoundBrush {
             let f = step / remain;
             px = lerp(px, tx, f);
             py = lerp(py, ty, f);
-            dabs.push(self.make_dab(px, py, radius));
+            dabs.push(self.make_dab(px, py, radius, state.tilt));
         }
-        dabs.push(self.make_dab(tx, ty, state.last_radius));
+        dabs.push(self.make_dab(tx, ty, state.last_radius, state.tilt));
         state.since_dab = (tx, ty);
         dabs
     }
@@ -452,5 +483,72 @@ mod tip_tests {
         assert!(d.tip.is_some());
         // 蒙版值：dab 左侧 (x < 32) 应有非零 alpha，右侧无
         // （真正的像素验证在 paint-render 侧；这里验证 dab 携带 tip）
+    }
+}
+
+#[cfg(test)]
+mod tilt_stroke_tests {
+    use super::*;
+    use crate::input::PointerKind;
+
+    fn pen_sample(x: f64, y: f64, tilt: (f32, f32)) -> PointerSample {
+        PointerSample {
+            x,
+            y,
+            pressure: Some(1.0),
+            tilt: Some(tilt),
+            kind: PointerKind::Pen,
+            id: 0,
+            t_us: 0,
+        }
+    }
+
+    #[test]
+    fn tilt_produces_anisotropic_dab() {
+        let brush = RoundBrush {
+            smoothing: 0.0,
+            tilt_sensitivity: 1.0,
+            ..RoundBrush::default()
+        };
+        let mut st = StrokeState::new(50.0, 50.0, 6.0);
+        let dabs = StrokeGen::begin(&brush, &mut st, &pen_sample(50.0, 50.0, (0.6, 0.0)));
+        let d = &dabs[0];
+        // 倾斜沿 +x → 长轴 ⟂ x（angle≈π/2），aspect < 1
+        assert!(d.aspect < 0.9, "aspect={}", d.aspect);
+        assert!((d.angle - std::f32::consts::FRAC_PI_2).abs() < 0.01);
+
+        // 无倾斜（鼠标）→ 圆形
+        let mut st2 = StrokeState::new(0.0, 0.0, 6.0);
+        let d2 = StrokeGen::begin(&brush, &mut st2, &PointerSample::mouse(0.0, 0.0));
+        assert_eq!(d2[0].aspect, 1.0);
+
+        // 灵敏度 0 → 倾斜不影响
+        let off = RoundBrush {
+            smoothing: 0.0,
+            tilt_sensitivity: 0.0,
+            ..RoundBrush::default()
+        };
+        let mut st3 = StrokeState::new(0.0, 0.0, 6.0);
+        let d3 = StrokeGen::begin(&off, &mut st3, &pen_sample(0.0, 0.0, (1.2, 0.0)));
+        assert_eq!(d3[0].aspect, 1.0);
+    }
+
+    #[test]
+    fn tilt_interpolates_along_stroke() {
+        let brush = RoundBrush {
+            smoothing: 0.0,
+            tilt_sensitivity: 1.0,
+            size: 10.0,
+            ..RoundBrush::default()
+        };
+        let mut st = StrokeState::new(10.0, 50.0, 5.0);
+        StrokeGen::begin(&brush, &mut st, &pen_sample(10.0, 50.0, (0.0, 0.0)));
+        let dabs = StrokeGen::extend(&brush, &mut st, &pen_sample(60.0, 50.0, (1.4, 0.0)));
+        assert!(!dabs.is_empty());
+        // 中途 dab 的 aspect 应介于两端之间（首个接近 1，渐向 <0.7）
+        let first = dabs.first().unwrap().aspect;
+        let last = dabs.last().unwrap().aspect;
+        assert!(first > last, "倾斜沿笔画增强: {first} → {last}");
+        assert!(last < 0.75);
     }
 }

@@ -121,6 +121,8 @@ pub fn line_dabs(
                 erase: false,
                 tip: None,
                 scatter: 0.0,
+                aspect: 1.0,
+                angle: 0.0,
             }
         })
         .collect()
@@ -279,7 +281,6 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod font_tests {
     use super::*;
-    use crate::layer::LayerId;
 
     #[test]
     fn arial_text_rasterizes() {
@@ -306,10 +307,9 @@ mod font_tests {
         let mut ink = 0;
         for y in bounds.y as i64..bounds.y2() {
             for x in bounds.x as i64..bounds.x2() {
-                if let Some(t) = g.get(TileId::at(x as i64, y as i64)) {
-                    let (ox, oy) = TileId::at(x as i64, y as i64).origin();
-                    if t.pixels()[(((y as i64 - oy) * 256 + (x as i64 - ox)) * 4) as usize + 3] > 0
-                    {
+                if let Some(t) = g.get(TileId::at(x, y)) {
+                    let (ox, oy) = TileId::at(x, y).origin();
+                    if t.pixels()[(((y - oy) * 256 + (x - ox)) * 4) as usize + 3] > 0 {
                         ink += 1;
                     }
                 }

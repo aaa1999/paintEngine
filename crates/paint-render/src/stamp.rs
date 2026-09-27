@@ -40,7 +40,6 @@ fn stamp_dab(
     let x1 = dab.x as i64 + ri;
     let y1 = dab.y as i64 + ri;
 
-    let r2 = (r * r) as f32;
     for ty in y0 >> 8..=y1 >> 8 {
         for tx in x0 >> 8..=x1 >> 8 {
             let id = TileId {
@@ -50,7 +49,7 @@ fn stamp_dab(
             recorder.capture(grid, id);
             let origin = (tx << 8, ty << 8);
             let tile = grid.get_or_create_mut(id);
-            stamp_tile(tile, origin, dab, r2, x0, y0, x1, y1, clip, id);
+            stamp_tile(tile, origin, dab, x0, y0, x1, y1, clip, id);
         }
     }
 }
@@ -60,7 +59,6 @@ fn stamp_tile(
     tile: &mut TileData,
     origin: (i64, i64),
     dab: &Dab,
-    r2: f32,
     bx0: i64,
     by0: i64,
     bx1: i64,
@@ -79,24 +77,39 @@ fn stamp_tile(
     let py1 = (by1 - origin.1).min(TILE as i64 - 1).max(0) as u32;
 
     let px = tile.pixels_mut();
-    let radius = dab.radius.max(0.0);
+    let radius = dab.radius.max(0.001);
+    // 各向异性：旋转到长轴系（tilt 笔刷的椭圆笔形）
+    let aspect = dab.aspect.clamp(0.05, 1.0);
+    let (ca, sa) = if aspect < 1.0 {
+        (dab.angle.cos() as f64, dab.angle.sin() as f64)
+    } else {
+        (1.0, 0.0)
+    };
+    let inv_ry = 1.0 / (radius * aspect) as f64;
 
     for py in py0..=py1 {
         // 像素中心采样
-        let dy = (origin.1 + py as i64) as f64 + 0.5 - dab.y;
+        let dy0 = (origin.1 + py as i64) as f64 + 0.5 - dab.y;
         for pxx in px0..=px1 {
-            let dx = (origin.0 + pxx as i64) as f64 + 0.5 - dab.x;
-            let d2 = (dx * dx + dy * dy) as f32;
-            if d2 >= r2 {
+            let dx0 = (origin.0 + pxx as i64) as f64 + 0.5 - dab.x;
+            // 长轴分量（半径 = radius）；短轴分量（半径 = radius × aspect）
+            let dx = ca * dx0 + sa * dy0;
+            let dy = -sa * dx0 + ca * dy0;
+            let t2 = ((dx / radius as f64) * (dx / radius as f64) + (dy * inv_ry) * (dy * inv_ry))
+                as f32;
+            if t2 >= 1.0 {
                 continue;
             }
             // 纹理尖：alpha 蒙版来自尖图采样（散布偏移由 dab 坐标哈希确定）
             let tip_a = dab.tip.as_ref().map(|tip| {
                 let ang = ((dab.x * 12.9898 + dab.y * 78.233).fract() * 43758.5453).fract();
-                let ox = (ang * 2.0 - 1.0) * dab.scatter as f64 * radius as f64;
-                let oy = ((ang * 917.3).fract() * 2.0 - 1.0) * dab.scatter as f64 * radius as f64;
-                let nx = (dx + ox) / radius.max(0.001) as f64 * 0.5 + 0.5;
-                let ny = (dy + oy) / radius.max(0.001) as f64 * 0.5 + 0.5;
+                let ox = (ang * 2.0 - 1.0) * dab.scatter as f64 * dab.radius as f64;
+                let oy =
+                    ((ang * 917.3).fract() * 2.0 - 1.0) * dab.scatter as f64 * dab.radius as f64;
+                let sx = ca * (dx0 + ox) + sa * (dy0 + oy);
+                let sy = -sa * (dx0 + ox) + ca * (dy0 + oy);
+                let nx = (sx / dab.radius.max(0.001) as f64) * 0.5 + 0.5;
+                let ny = (sy * inv_ry) * 0.5 + 0.5;
                 let ts = tip.size as i64;
                 let tx = (nx * ts as f64) as i64;
                 let ty = (ny * ts as f64) as i64;
@@ -108,10 +121,7 @@ fn stamp_tile(
             });
             let a = match tip_a {
                 Some(v) => v * alpha * clip_v(clip, id, pxx, py),
-                None => {
-                    let t = d2.sqrt() / radius;
-                    falloff(t, hardness) * alpha * clip_v(clip, id, pxx, py)
-                }
+                None => falloff(t2.sqrt(), hardness) * alpha * clip_v(clip, id, pxx, py),
             };
             if a <= 1.0 / 255.0 {
                 continue;
@@ -214,6 +224,8 @@ mod tests {
             erase: false,
             tip: None,
             scatter: 0.0,
+            aspect: 1.0,
+            angle: 0.0,
         }
     }
 
@@ -357,6 +369,8 @@ mod tests {
             erase: true,
             tip: None,
             scatter: 0.0,
+            aspect: 1.0,
+            angle: 0.0,
             ..dab_at(50.0, 50.0, 4.0, DabMode::Buildup)
         };
         stamp_dabs(
@@ -409,6 +423,8 @@ mod tip_stamp_tests {
             erase: false,
             tip: Some(Arc::new(tip)),
             scatter: 0.0,
+            aspect: 1.0,
+            angle: 0.0,
         };
         stamp_dabs(
             &mut s.get_mut(lid).tiles,
@@ -428,5 +444,85 @@ mod tip_stamp_tests {
         // dab 中心 (64,64) 半径 8：左半（60,64）有墨；右半（68,64）无
         assert_eq!(px(60, 64), 255, "尖图白侧盖墨");
         assert_eq!(px(68, 64), 0, "尖图黑侧不盖");
+    }
+}
+
+#[cfg(test)]
+mod tilt_tests {
+    use super::*;
+    use paint_core::color::Color;
+    use paint_core::layer::LayerStack;
+    use paint_core::stroke::DabMode;
+    use paint_core::tile::TILE;
+
+    fn px(s: &LayerStack, lid: paint_core::LayerId, x: usize, y: usize) -> u8 {
+        let t = s
+            .get(lid)
+            .tiles
+            .get(TileId::at(x as i64, y as i64))
+            .unwrap();
+        t.pixels()[(y * TILE as usize + x) * 4 + 3]
+    }
+
+    /// 椭圆 dab：长轴 x（angle=0），aspect=0.5 → 横向半径 10、纵向 5。
+    #[test]
+    fn anisotropic_dab_ellipse() {
+        let mut s = LayerStack::new();
+        let lid = s.insert(None);
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 10.0,
+            hardness: 1.0,
+            color: Color::BLACK,
+            alpha: 1.0,
+            mode: DabMode::Buildup,
+            erase: false,
+            tip: None,
+            scatter: 0.0,
+            aspect: 0.5,
+            angle: 0.0,
+        };
+        stamp_dabs(
+            &mut s.get_mut(lid).tiles,
+            &[dab],
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
+        assert_eq!(px(&s, lid, 72, 64), 255, "长轴像素中心 8.5 < 10 内");
+        assert_eq!(px(&s, lid, 68, 64), 255, "短轴像素中心 4.5 < 5 内");
+        assert_eq!(px(&s, lid, 64, 69), 0, "短轴像素中心 5.5 > 5 外");
+        assert_eq!(px(&s, lid, 74, 64), 0, "长轴像素中心 10.5 > 10 外");
+    }
+
+    /// 旋转 90° 的椭圆：长轴变纵向。
+    #[test]
+    fn anisotropic_dab_rotated() {
+        let mut s = LayerStack::new();
+        let lid = s.insert(None);
+        let dab = Dab {
+            x: 64.0,
+            y: 64.0,
+            radius: 10.0,
+            hardness: 1.0,
+            color: Color::BLACK,
+            alpha: 1.0,
+            mode: DabMode::Buildup,
+            erase: false,
+            tip: None,
+            scatter: 0.0,
+            aspect: 0.5,
+            angle: std::f32::consts::FRAC_PI_2,
+        };
+        stamp_dabs(
+            &mut s.get_mut(lid).tiles,
+            &[dab],
+            None,
+            &mut StrokeRecorder::new(lid),
+        );
+        assert_eq!(px(&s, lid, 64, 72), 255, "旋转后纵向变长轴");
+        assert_eq!(px(&s, lid, 64, 71), 255); // 旋转后长轴：7.5 < 10
+        assert_eq!(px(&s, lid, 69, 64), 0, "横向变短轴 ±7 外");
+        assert_eq!(px(&s, lid, 67, 64), 255, "横向 ±3 内");
     }
 }
