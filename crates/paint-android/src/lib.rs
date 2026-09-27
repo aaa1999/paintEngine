@@ -151,7 +151,6 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeRender
     handle: jlong,
     bitmap: JObject,
 ) -> jboolean {
-    let bitmap = bitmap.into();
     let mut env = env;
     let Some(mut locked) = lock_bitmap(&mut env, &bitmap) else {
         return 0;
