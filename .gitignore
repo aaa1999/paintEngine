@@ -5,6 +5,9 @@
 # 本地实验脚本
 /scratch/
 
+# wasm-pack 生成产物
+/crates/paint-wasm/www/pkg/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -4,6 +4,7 @@ members = [
     "crates/paint-core",
     "crates/paint-render",
     "crates/paint-desktop",
+    "crates/paint-wasm",
 ]
 
 [workspace.package]

@@ -1,0 +1,352 @@
+//! paint-wasm：Web 壳。
+//!
+//! - 呈现：`ImageData` + `putImageData`（帧缓冲不透明，预乘与直行等价）
+//! - 输入：Pointer Events；高采样走 `pointerrawupdate`（Chromium），
+//!   `pointermove` 兜底（重复 Move 无害：零距离不产生 dab）
+//! - 手势：双指平移缩放由引擎状态机处理，壳层只转发原始事件
+//! - 重绘：requestAnimationFrame 按需渲染（needs_render 标记）
+
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use web_sys::{
+    CanvasRenderingContext2d, HtmlCanvasElement, ImageData, PointerEvent, ResizeObserver,
+};
+
+use paint_core::input::{PointerKind, PointerPhase, PointerSample};
+use paint_core::render::{EngineConfig, Surface};
+use paint_core::{BlendMode, Color, Engine, PlatformEvent, Rect, Tool};
+use paint_render::SoftwareRenderer;
+
+type PointerClosure = Closure<dyn FnMut(PointerEvent)>;
+type IdleClosure = Closure<dyn FnMut()>;
+
+struct Inner {
+    engine: Engine,
+    canvas: HtmlCanvasElement,
+    ctx: CanvasRenderingContext2d,
+    needs_render: Cell<bool>,
+    last_size: Cell<(u32, u32)>,
+}
+
+#[wasm_bindgen]
+pub struct PaintApp {
+    inner: Rc<RefCell<Inner>>,
+    /// 事件闭包必须保活（Drop 即解绑）
+    keep: RefCell<Vec<PointerClosure>>,
+    hover_keep: RefCell<Vec<IdleClosure>>,
+    raf_keep: RefCell<Option<IdleClosure>>,
+    observer: RefCell<Option<ResizeObserver>>,
+}
+
+#[wasm_bindgen]
+impl PaintApp {
+    #[wasm_bindgen(constructor)]
+    pub fn new(canvas: HtmlCanvasElement) -> Result<PaintApp, JsValue> {
+        let ctx: CanvasRenderingContext2d = canvas
+            .get_context("2d")?
+            .ok_or(JsValue::from_str("无法获取 2d 上下文"))?
+            .dyn_into()?;
+
+        let engine = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+        let inner = Rc::new(RefCell::new(Inner {
+            engine,
+            canvas: canvas.clone(),
+            ctx,
+            needs_render: Cell::new(true),
+            last_size: Cell::new((0, 0)),
+        }));
+
+        let app = PaintApp {
+            inner: inner.clone(),
+            keep: RefCell::new(Vec::new()),
+            hover_keep: RefCell::new(Vec::new()),
+            raf_keep: RefCell::new(None),
+            observer: RefCell::new(None),
+        };
+        app.bind_pointer_events(inner.clone())?;
+        app.observe_resize(inner.clone());
+        app.start_render_loop(inner);
+        Ok(app)
+    }
+
+    // ── 对 JS 暴露的控制面 ──
+
+    pub fn set_tool(&self, tool: &str) {
+        let t = match tool {
+            "eraser" => Tool::Eraser,
+            _ => Tool::Brush,
+        };
+        self.inner.borrow_mut().engine.set_tool(t);
+    }
+
+    pub fn set_brush_size(&self, size: f32) {
+        self.inner.borrow_mut().engine.brush_mut().size = size.clamp(1.0, 512.0);
+    }
+
+    pub fn set_brush_color(&self, r: u8, g: u8, b: u8) {
+        self.inner.borrow_mut().engine.brush_mut().color = Color { r, g, b };
+    }
+
+    pub fn set_brush_opacity(&self, v: f32) {
+        let mut inner = self.inner.borrow_mut();
+        let v = v.clamp(0.01, 1.0);
+        inner.engine.brush_mut().opacity = v;
+        inner.engine.brush_mut().flow = v;
+    }
+
+    pub fn undo(&self) -> bool {
+        self.mark_render(|e| e.undo())
+    }
+
+    pub fn redo(&self) -> bool {
+        self.mark_render(|e| e.redo())
+    }
+
+    pub fn add_layer(&self) -> bool {
+        self.mark_render(|e| e.add_layer().is_some())
+    }
+
+    pub fn merge_down(&self) -> bool {
+        self.mark_render(|e| e.merge_down())
+    }
+
+    pub fn flatten(&self) -> bool {
+        self.mark_render(|e| e.flatten())
+    }
+
+    /// 设置活动图层的混合模式（[`BlendMode::ALL`] 的下标）。
+    pub fn set_active_blend_mode(&self, index: usize) {
+        if let Some(m) = BlendMode::ALL.get(index) {
+            self.mark_render(|e| {
+                let active = e.document().active_layer();
+                e.document_mut().layers_mut().get_mut(active).blend_mode = *m;
+                true
+            });
+        }
+    }
+
+    /// 混合模式名列表，供 JS 构建 UI。
+    pub fn blend_mode_names(&self) -> Vec<JsValue> {
+        BlendMode::ALL
+            .iter()
+            .map(|m| JsValue::from_str(m.name()))
+            .collect()
+    }
+
+    pub fn export_png(&self) -> Vec<u8> {
+        self.inner
+            .borrow_mut()
+            .engine
+            .export_png(None, 1.0, true)
+            .unwrap_or_default()
+    }
+
+    pub fn import_png(&self, data: Vec<u8>) -> bool {
+        self.mark_render(|e| e.import_png(&data).is_some())
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.inner.borrow().engine.document().layers().len()
+    }
+
+    // ── 内部：事件绑定与渲染循环 ──
+
+    fn mark_render(&self, f: impl FnOnce(&mut Engine) -> bool) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let r = f(&mut inner.engine);
+        inner.needs_render.set(true);
+        r
+    }
+
+    fn bind_pointer_events(&self, inner: Rc<RefCell<Inner>>) -> Result<(), JsValue> {
+        let target = inner.borrow().canvas.clone();
+
+        let mk = |phase: PointerPhase| {
+            let inner = inner.clone();
+            PointerClosure::new(move |e: PointerEvent| {
+                e.prevent_default();
+                dispatch(&inner, phase, &e);
+            })
+        };
+
+        let down = mk(PointerPhase::Down);
+        let up = mk(PointerPhase::Up);
+        let cancel = mk(PointerPhase::Cancel);
+        let raw_move = mk(PointerPhase::Move);
+        let move_evt = mk(PointerPhase::Move);
+
+        target.add_event_listener_with_callback("pointerdown", down.as_ref().unchecked_ref())?;
+        target.add_event_listener_with_callback("pointerup", up.as_ref().unchecked_ref())?;
+        target
+            .add_event_listener_with_callback("pointercancel", cancel.as_ref().unchecked_ref())?;
+        // pointerrawupdate：Chromium 高采样；不支持时 addEventListener 静默忽略
+        target.add_event_listener_with_callback(
+            "pointerrawupdate",
+            raw_move.as_ref().unchecked_ref(),
+        )?;
+        target
+            .add_event_listener_with_callback("pointermove", move_evt.as_ref().unchecked_ref())?;
+
+        // 数位笔悬停 → PenInRange（手掌拒绝）
+        {
+            let inner_hover = inner.clone();
+            let leave = IdleClosure::new(move || {
+                let mut i = inner_hover.borrow_mut();
+                i.engine.handle_event(PlatformEvent::PenInRange(false));
+                i.needs_render.set(true);
+            });
+            target
+                .add_event_listener_with_callback("pointerleave", leave.as_ref().unchecked_ref())?;
+            self.hover_keep.borrow_mut().push(leave);
+        }
+
+        self.keep
+            .borrow_mut()
+            .extend([down, up, cancel, raw_move, move_evt]);
+        Ok(())
+    }
+
+    fn observe_resize(&self, inner: Rc<RefCell<Inner>>) {
+        let inner2 = inner.clone();
+        let cb = IdleClosure::new(move || {
+            sync_size(&inner2);
+        });
+        if let Ok(obs) = ResizeObserver::new(cb.as_ref().unchecked_ref()) {
+            let canvas = inner.borrow().canvas.clone();
+            obs.observe(&canvas);
+            *self.observer.borrow_mut() = Some(obs);
+        }
+        self.hover_keep.borrow_mut().push(cb);
+    }
+
+    fn start_render_loop(&self, inner: Rc<RefCell<Inner>>) {
+        let f: Rc<RefCell<Option<IdleClosure>>> = Rc::new(RefCell::new(None));
+        let g = f.clone();
+        let inner2 = inner.clone();
+        *g.borrow_mut() = Some(IdleClosure::new(move || {
+            {
+                let mut borrow = inner2.borrow_mut();
+                let Inner {
+                    engine,
+                    ctx,
+                    needs_render,
+                    ..
+                } = &mut *borrow;
+                if needs_render.get() {
+                    let mut surface = CanvasSurface { ctx };
+                    engine.render(&mut surface);
+                    needs_render.set(false);
+                }
+            }
+            if let Some(w) = web_sys::window() {
+                let _ = w
+                    .request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref());
+            }
+        }));
+        if let Some(w) = web_sys::window() {
+            let _ =
+                w.request_animation_frame(g.borrow().as_ref().unwrap().as_ref().unchecked_ref());
+        }
+        let taken = g.borrow_mut().take();
+        *self.raf_keep.borrow_mut() = taken;
+    }
+}
+
+fn dispatch(inner: &Rc<RefCell<Inner>>, phase: PointerPhase, e: &PointerEvent) {
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
+    let canvas = inner.borrow().canvas.clone();
+    let rect = canvas.get_bounding_client_rect();
+
+    let kind = match e.pointer_type().as_str() {
+        "pen" => PointerKind::Pen,
+        "eraser" => PointerKind::Eraser,
+        "touch" => PointerKind::Touch,
+        _ => PointerKind::Mouse,
+    };
+
+    // 悬停（无按键）：仅用数位笔悬停驱动手掌拒绝，不产生笔画事件
+    if e.buttons() == 0 {
+        let mut i = inner.borrow_mut();
+        if kind == PointerKind::Pen {
+            i.engine.handle_event(PlatformEvent::PenInRange(true));
+        }
+        i.needs_render.set(true);
+        return;
+    }
+
+    let pressure = match kind {
+        PointerKind::Pen | PointerKind::Eraser => Some(e.pressure().clamp(0.0, 1.0)),
+        _ => None,
+    };
+    let t_us = web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| (p.now() * 1000.0) as u64)
+        .unwrap_or(0);
+
+    let sample = PointerSample {
+        x: (e.client_x() as f64 - rect.left()) * dpr,
+        y: (e.client_y() as f64 - rect.top()) * dpr,
+        pressure,
+        tilt: Some((
+            (e.tilt_x() as f32).to_radians(),
+            (e.tilt_y() as f32).to_radians(),
+        )),
+        kind,
+        id: e.pointer_id() as u64,
+        t_us,
+    };
+
+    let mut i = inner.borrow_mut();
+    if kind == PointerKind::Pen {
+        i.engine.handle_event(PlatformEvent::PenInRange(true));
+    }
+    i.engine
+        .handle_event(PlatformEvent::Pointer { phase, sample });
+    i.needs_render.set(true);
+}
+
+fn sync_size(inner: &Rc<RefCell<Inner>>) {
+    let dpr = web_sys::window()
+        .map(|w| w.device_pixel_ratio())
+        .unwrap_or(1.0);
+    let w = (inner.borrow().canvas.client_width() as f64 * dpr)
+        .round()
+        .max(1.0) as u32;
+    let h = (inner.borrow().canvas.client_height() as f64 * dpr)
+        .round()
+        .max(1.0) as u32;
+    let mut i = inner.borrow_mut();
+    if i.last_size.get() != (w, h) {
+        i.last_size.set((w, h));
+        i.canvas.set_width(w);
+        i.canvas.set_height(h);
+        i.engine.handle_event(PlatformEvent::Resize {
+            w,
+            h,
+            scale: dpr as f32,
+        });
+        i.needs_render.set(true);
+    }
+}
+
+struct CanvasSurface<'a> {
+    ctx: &'a CanvasRenderingContext2d,
+}
+
+impl Surface for CanvasSurface<'_> {
+    fn present_cpu(&mut self, rgba: &[u8], size: (u32, u32), _dirty: Option<Rect>) {
+        if rgba.len() != (size.0 as usize) * (size.1 as usize) * 4 {
+            return;
+        }
+        if let Ok(img) =
+            ImageData::new_with_u8_clamped_array_and_sh(wasm_bindgen::Clamped(rgba), size.0, size.1)
+        {
+            let _ = self.ctx.put_image_data(&img, 0.0, 0.0);
+        }
+    }
+}

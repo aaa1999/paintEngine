@@ -118,7 +118,11 @@ mod tests {
         let png = encode_png(&frame, 4, 4).unwrap();
         let (dec, w, h) = decode_png(&png).unwrap();
         assert_eq!((w, h), (4, 4));
-        assert!(dec.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        assert!(dec
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [255, 0, 0, 255]));
     }
 
     #[test]
@@ -150,6 +154,10 @@ mod tests {
         }
         let (dec, w, h) = decode_png(&out).unwrap();
         assert_eq!((w, h), (2, 2));
-        assert!(dec.chunks_exact(4).all(|p| p == [10, 20, 30, 255]));
+        assert!(dec
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [10, 20, 30, 255]));
     }
 }

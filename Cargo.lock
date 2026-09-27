@@ -1053,6 +1053,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "paint-wasm"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "paint-core",
+ "paint-render",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
