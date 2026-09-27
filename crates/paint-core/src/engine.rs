@@ -77,6 +77,8 @@ pub struct Engine {
     gesture_latch: bool,
     /// 内容级变换的撤销采集器（begin→commit 存活）。
     transform_recorder: Option<StrokeRecorder>,
+    /// 内部剪贴板（瓦片网格自带画布绝对位置）。
+    clipboard: Option<TileGrid>,
 }
 
 impl Engine {
@@ -100,6 +102,7 @@ impl Engine {
             gesture: None,
             gesture_latch: false,
             transform_recorder: None,
+            clipboard: None,
         }
     }
 
@@ -264,6 +267,263 @@ impl Engine {
             self.dirty = Dirty::All;
         }
         r
+    }
+
+    // ── 剪贴板（内部瓦片级 + 外部图像）──
+
+    /// 复制选中内容（无选区=整层内容）到内部剪贴板。返回是否有内容。
+    pub fn copy_selection(&mut self) -> bool {
+        if self.transforming() {
+            return false;
+        }
+        match self.lift_copy() {
+            Some((grid, _)) => {
+                self.clipboard = Some(grid);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 剪切：复制 + 清除原内容（整组入撤销）。
+    pub fn cut_selection(&mut self) -> bool {
+        if !self.copy_selection() {
+            return false;
+        }
+        self.delete_selection()
+    }
+
+    /// 删除选中内容（无选区=整层；入撤销）。
+    pub fn delete_selection(&mut self) -> bool {
+        if self.transforming() {
+            return false;
+        }
+        let Some(layer) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let sel = self.doc.selection().cloned();
+        let Some(bbox) = self.region_bbox() else {
+            return false;
+        };
+        let mut recorder = StrokeRecorder::new(layer);
+        {
+            let l = self.doc.layers_mut().get_mut(layer);
+            for ty in ((bbox.y as i64 >> 8) - 1)..=((bbox.y2() >> 8) + 1) {
+                for tx in ((bbox.x as i64 >> 8) - 1)..=((bbox.x2() >> 8) + 1) {
+                    let id = TileId {
+                        x: tx as i32,
+                        y: ty as i32,
+                    };
+                    let Some(src) = l.tiles.get(id).cloned() else {
+                        continue;
+                    };
+                    let sp = src.pixels();
+                    let mut any = false;
+                    for i in 0..sp.len() / 4 {
+                        let hit = match &sel {
+                            Some(g) => g.get(id).map(|t| t.pixels()[i * 4] > 127).unwrap_or(false),
+                            None => sp[i * 4 + 3] > 0,
+                        };
+                        if hit && sp[i * 4 + 3] > 0 {
+                            if !any {
+                                recorder.capture(&l.tiles, id);
+                                any = true;
+                            }
+                            let t = l.tiles.get_or_create_mut(id);
+                            t.pixels_mut()[i * 4..i * 4 + 4].copy_from_slice(&[0, 0, 0, 0]);
+                        }
+                    }
+                }
+            }
+            l.tiles.prune();
+        }
+        self.doc.commit(recorder.finish("Cut"));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    /// 粘贴内部剪贴板：以浮动变换形态出现在原位置（拖拽定位后 Enter 提交）。
+    pub fn paste_float(&mut self) -> bool {
+        let Some(grid) = self.clipboard.clone() else {
+            return false;
+        };
+        if self.transforming() {
+            return false;
+        }
+        let Some(layer) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let Some(bbox) = grid.content_bounds_precise() else {
+            return false;
+        };
+        self.doc.set_floating(Some(crate::float::Floating {
+            tiles: grid,
+            layer,
+            affine: crate::float::Affine2::IDENTITY,
+            pivot: (
+                bbox.x as f64 + bbox.w as f64 / 2.0,
+                bbox.y as f64 + bbox.h as f64 / 2.0,
+            ),
+        }));
+        // 粘贴无"提升"步骤：采集器只捕获提交写入
+        self.transform_recorder = Some(StrokeRecorder::new(layer));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    /// 粘贴外部图像（PNG 字节）：置于当前视野中心，浮动形态。
+    pub fn paste_image_float(&mut self, png: &[u8]) -> bool {
+        let Ok((rgba, w, h)) = crate::io::decode_png(png) else {
+            return false;
+        };
+        self.paste_premul_float(&rgba, w, h)
+    }
+
+    /// 粘贴直行 RGBA（系统剪贴板常见形态）：先预乘再入浮动。
+    pub fn paste_rgba_float(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
+        if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+            return false;
+        }
+        let mut premul = rgba.to_vec();
+        for px in premul.as_chunks_mut::<4>().0 {
+            let a = px[3] as u32;
+            for c in px.iter_mut().take(3) {
+                *c = ((*c as u32 * a + 127) / 255) as u8;
+            }
+        }
+        self.paste_premul_float(&premul, w, h)
+    }
+
+    fn paste_premul_float(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
+        if self.transforming() {
+            return false;
+        }
+        let Some(layer) = self.doc.layers().try_active() else {
+            return false;
+        };
+        // 视野中心（画布坐标）为图像中心
+        let (sw, sh) = self.size;
+        if sw == 0 || sh == 0 {
+            return false;
+        }
+        let (cx, cy) = self
+            .doc
+            .viewport()
+            .screen_to_canvas(sw as f64 / 2.0, sh as f64 / 2.0);
+        // 图像左上角取整到画布像素，随后以画布绝对坐标写入瓦片
+        let (ix0, iy0) = (
+            (cx - w as f64 / 2.0).round() as i64,
+            (cy - h as f64 / 2.0).round() as i64,
+        );
+        let mut grid = TileGrid::new();
+        for gy in 0..h as i64 {
+            for gx in 0..w as i64 {
+                let src = ((gy * w as i64 + gx) * 4) as usize;
+                if rgba[src + 3] == 0 {
+                    continue;
+                }
+                let id = TileId::at(ix0 + gx, iy0 + gy);
+                let t = grid.get_or_create_mut(id);
+                let (ox, oy) = id.origin();
+                let lx = (ix0 + gx - ox) as usize;
+                let ly = (iy0 + gy - oy) as usize;
+                let dst = (ly * 256 + lx) * 4;
+                t.pixels_mut()[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
+            }
+        }
+        grid.prune();
+        self.doc.set_floating(Some(crate::float::Floating {
+            tiles: grid,
+            layer,
+            affine: crate::float::Affine2::IDENTITY,
+            pivot: (cx, cy),
+        }));
+        self.transform_recorder = Some(StrokeRecorder::new(layer));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    pub fn has_clipboard(&self) -> bool {
+        self.clipboard.is_some()
+    }
+
+    /// 选区内容（无选区=整层）导出 PNG（系统剪贴板写入用）。
+    pub fn copy_selection_png(&self) -> Option<Vec<u8>> {
+        let _ = self.doc.layers().try_active()?;
+        let (grid, bbox) = self.lift_copy()?;
+        let (w, h) = (bbox.w as usize, bbox.h as usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        for id in grid.ids() {
+            let (ox, oy) = id.origin();
+            let t = grid.get(id).unwrap();
+            for row in 0..TILE as i64 {
+                let gy = oy + row;
+                if gy < bbox.y as i64 || gy >= bbox.y2() {
+                    continue;
+                }
+                for col in 0..TILE as i64 {
+                    let gx = ox + col;
+                    if gx < bbox.x as i64 || gx >= bbox.x2() {
+                        continue;
+                    }
+                    let s = ((row * 256 + col) * 4) as usize;
+                    let d = (((gy - bbox.y as i64) * w as i64 + (gx - bbox.x as i64)) * 4) as usize;
+                    rgba[d..d + 4].copy_from_slice(&t.pixels()[s..s + 4]);
+                }
+            }
+        }
+        crate::io::encode_png(&rgba, w as u32, h as u32).ok()
+    }
+
+    /// 提升范围 bbox：选区 bbox 或图层内容 bbox。
+    fn region_bbox(&self) -> Option<Rect> {
+        let layer = self.doc.layers().try_active()?;
+        match self.doc.selection() {
+            Some(g) => g.content_bounds(),
+            None => self.doc.layers().get(layer).tiles.content_bounds_precise(),
+        }
+    }
+
+    /// 拷贝选中像素（不动图层）：返回 (网格, bbox)。
+    fn lift_copy(&self) -> Option<(TileGrid, Rect)> {
+        let layer = self.doc.layers().try_active()?;
+        let sel = self.doc.selection();
+        let bbox = self.region_bbox()?;
+        let mut grid = TileGrid::new();
+        let l = self.doc.layers().get(layer);
+        for ty in ((bbox.y as i64 >> 8) - 1)..=((bbox.y2() >> 8) + 1) {
+            for tx in ((bbox.x as i64 >> 8) - 1)..=((bbox.x2() >> 8) + 1) {
+                let id = TileId {
+                    x: tx as i32,
+                    y: ty as i32,
+                };
+                let Some(src) = l.tiles.get(id) else { continue };
+                let sp = src.pixels();
+                let mut any = false;
+                {
+                    let t = grid.get_or_create_mut(id);
+                    let fp = t.pixels_mut();
+                    for i in 0..fp.len() / 4 {
+                        let hit = match sel {
+                            Some(g) => g.get(id).map(|t| t.pixels()[i * 4] > 127).unwrap_or(false),
+                            None => sp[i * 4 + 3] > 0,
+                        };
+                        if hit && sp[i * 4 + 3] > 0 {
+                            any = true;
+                            fp[i * 4..i * 4 + 4].copy_from_slice(&sp[i * 4..i * 4 + 4]);
+                        }
+                    }
+                }
+                if !any {
+                    grid.remove(id);
+                }
+            }
+        }
+        if grid.is_empty() {
+            None
+        } else {
+            Some((grid, bbox))
+        }
     }
 
     // ── 内容级变换（选区或整层的移动/旋转/缩放，浮动预览）──

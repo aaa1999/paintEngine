@@ -44,6 +44,35 @@ impl HasWindowHandle for SharedWindow {
     }
 }
 
+/// PNG 字节 → arboard ImageData（直行 RGBA）。
+fn image_from_png(png: &[u8]) -> Option<arboard::ImageData<'_>> {
+    // copy_selection_png 输出直行 PNG；arboard 接受直行
+    let mut rgba = Vec::new();
+    let (w, h) = decode_png_straight(png, &mut rgba)?;
+    Some(arboard::ImageData {
+        width: w,
+        height: h,
+        bytes: std::borrow::Cow::Owned(rgba),
+    })
+}
+
+fn decode_png_straight(png: &[u8], out: &mut Vec<u8>) -> Option<(usize, usize)> {
+    // 复用 paint-core 的解码（预乘）→ 反预乘回直行
+    let (premul, w, h) = paint_core::io::decode_png(png).ok()?;
+    let mut straight = premul;
+    for px in straight.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        for c in px.iter_mut().take(3) {
+            *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+    *out = straight;
+    Some((w as usize, h as usize))
+}
+
 fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut app = App::new();
@@ -182,6 +211,45 @@ impl App {
         let c = PALETTE[idx];
         self.engine.brush_mut().color = c;
         println!("颜色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
+    }
+
+    /// 复制：内部剪贴板 + 尝试写入系统剪贴板（PNG）。
+    fn copy_to_clipboard(&mut self) {
+        if !self.engine.copy_selection() {
+            println!("没有可复制的内容");
+            return;
+        }
+        println!("已复制（内部）");
+        if let Some(png) = self.engine.copy_selection_png() {
+            if let Some(img) = image_from_png(&png) {
+                if let Ok(mut cb) = arboard::Clipboard::new() {
+                    let _ = cb.set_image(img);
+                    println!("已写入系统剪贴板");
+                }
+            }
+        }
+    }
+
+    /// 粘贴：优先系统剪贴板图像，其次内部剪贴板。
+    fn paste_from_clipboard(&mut self) {
+        if self.engine.transforming() {
+            println!("请先提交或取消当前变换");
+            return;
+        }
+        if let Ok(mut cb) = arboard::Clipboard::new() {
+            if let Ok(img) = cb.get_image() {
+                let (w, h) = (img.width as u32, img.height as u32);
+                if w > 0 && h > 0 && self.engine.paste_rgba_float(&img.bytes, w, h) {
+                    println!("已粘贴系统图像 {w}×{h}（拖拽定位，Enter 提交）");
+                    return;
+                }
+            }
+        }
+        if self.engine.paste_float() {
+            println!("已粘贴（内部，Enter 提交）");
+        } else {
+            println!("剪贴板没有可粘贴内容");
+        }
     }
 
     fn dragging_stroke_modifier(&self) -> bool {
@@ -522,6 +590,16 @@ impl ApplicationHandler for App {
                     logical_key, state, ..
                 } = &event;
                 match (logical_key, state) {
+                    (Key::Named(NamedKey::Delete), ElementState::Pressed)
+                        if self.engine.has_selection() && !self.engine.transforming() =>
+                    {
+                        self.engine.delete_selection();
+                    }
+                    (Key::Named(NamedKey::Backspace), ElementState::Pressed)
+                        if self.engine.has_selection() && !self.engine.transforming() =>
+                    {
+                        self.engine.delete_selection();
+                    }
                     (Key::Named(NamedKey::Enter), ElementState::Pressed)
                         if self.engine.transforming() =>
                     {
@@ -590,6 +668,18 @@ impl ApplicationHandler for App {
                             "7" => self.set_palette(6),
                             "8" => self.set_palette(7),
                             "9" => self.set_palette(8),
+                            "c" | "C" if ctrl => {
+                                self.copy_to_clipboard();
+                            }
+                            "x" | "X" if ctrl => {
+                                if self.engine.cut_selection() {
+                                    self.copy_to_clipboard();
+                                    println!("已剪切");
+                                }
+                            }
+                            "v" | "V" if ctrl => {
+                                self.paste_from_clipboard();
+                            }
                             "t" | "T" if ctrl => {
                                 if self.engine.transforming() {
                                     self.engine.commit_transform();

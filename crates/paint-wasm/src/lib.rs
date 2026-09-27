@@ -267,6 +267,27 @@ impl PaintApp {
         self.inner.borrow().engine.transforming()
     }
 
+    /// 剪贴板：内部复制/剪切/粘贴 + 外部图像粘贴 + PNG 导出。
+    pub fn copy_selection(&self) -> bool {
+        self.inner.borrow_mut().engine.copy_selection()
+    }
+    pub fn cut_selection(&self) -> bool {
+        self.mark_render(|e| e.cut_selection())
+    }
+    pub fn paste_float(&self) -> bool {
+        self.mark_render(|e| e.paste_float())
+    }
+    pub fn paste_image_float(&self, png: Vec<u8>) -> bool {
+        self.mark_render(|e| e.paste_image_float(&png))
+    }
+    pub fn copy_selection_png(&self) -> Vec<u8> {
+        self.inner
+            .borrow()
+            .engine
+            .copy_selection_png()
+            .unwrap_or_default()
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

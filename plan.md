@@ -262,6 +262,17 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.7 剪贴板（2026-09-27）
+
+- [x] 内部剪贴板（引擎级、瓦片网格带画布绝对位置）：copy_selection（选区/无选区=整层）、cut（复制+清除整组入撤销）、delete_selection（Delete/Backspace）
+- [x] 粘贴即浮动：paste_float 原位出现、paste_image_float（PNG）与 paste_rgba_float（系统剪贴板直行 RGBA，内部预乘）置于视野中心——复用内容级变换的拖拽定位/提交/撤销机制；粘贴提交撤销组只含写入（无提升步骤）
+- [x] copy_selection_png：选区内容导出 PNG（系统剪贴板写入源）
+- [x] 桌面：arboard 图像互拷（Ctrl+C 复制+写系统剪贴板，Ctrl+X 剪切，Ctrl+V 优先系统图像→回退内部）；Delete 删除选区
+- [x] Web：复制/粘贴按钮 + Ctrl+C/V + paste 事件读外部图像（ClipboardItem 写入尽力而为，失败回退内部）
+- [x] e2e 5 项：复制粘贴提交撤销/剪切复原/外部 PNG/直行预乘叠白/变换中守卫
+- 修复（过程逼出）：外部图像粘贴的画布绝对定位 bug（瓦片 id 从未偏移到放置点）
+- 未做（记录）：Android 系统剪贴板 UI（引擎 API 已具备）；跨文档粘贴沿用原画布坐标
+
 ### M4.6 内容级变换（2026-09-27）
 
 - [x] 浮动层模型：`float.rs`（Affine2 仿射 + Floating）；选区（无选区=整层）内容提升为浮动层，合成器叠加渲染实时预览（CPU f32 全链与 GPU 对齐，parity 12/12 含复合变换与纯平移两项）

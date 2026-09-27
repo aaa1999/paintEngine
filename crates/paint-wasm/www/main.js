@@ -99,6 +99,47 @@ $("tipFile").onchange = async (e) => {
   e.target.value = "";
 };
 
+// 剪贴板
+$("copyBtn").onclick = async () => {
+  if (!app.copy_selection()) { $("status").textContent = "没有可复制内容"; return; }
+  $("status").textContent = "已复制";
+  // 尝试写系统剪贴板（需安全上下文与用户手势）
+  try {
+    const png = app.copy_selection_png();
+    if (png.length) {
+      const blob = new Blob([new Uint8Array(png)], { type: "image/png" });
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      $("status").textContent = "已复制（含系统剪贴板）";
+    }
+  } catch (e) { /* 内部剪贴板仍可用 */ }
+};
+$("pasteBtn").onclick = () => {
+  if (!app.paste_float()) { $("status").textContent = "剪贴板为空"; return; }
+  $("status").textContent = "已粘贴（拖拽定位，Enter 提交）";
+  refreshXbar();
+};
+// Ctrl+V：优先读系统剪贴板图像
+window.addEventListener("paste", async (e) => {
+  const items = e.clipboardData?.items || [];
+  for (const it of items) {
+    if (it.type.startsWith("image/")) {
+      const blob = it.getAsFile();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      // 非 PNG 也尝试按 PNG 解码失败则忽略
+      if (app.paste_image_float(bytes)) {
+        $("status").textContent = `已粘贴图像 ${blob.name || ""}`;
+        refreshXbar();
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+});
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "c") { e.preventDefault(); $("copyBtn").click(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === "v") { e.preventDefault(); $("pasteBtn").click(); }
+});
+
 // 内容级变换
 let xforming = false;
 function refreshXbar() {

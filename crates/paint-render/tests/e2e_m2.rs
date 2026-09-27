@@ -432,3 +432,100 @@ fn content_transform_selection_only_lifts_selected() {
     assert!(zone(32, 40) > 0, "选区外不动");
     assert!(e.commit_transform());
 }
+
+#[test]
+fn clipboard_copy_paste_roundtrip() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 30.0, 32.0);
+    let base = ink_count(&frame(&mut e, &mut s));
+    assert!(base > 0);
+
+    // 复制（无选区=整层）
+    assert!(e.copy_selection());
+    assert!(e.has_clipboard());
+    assert_eq!(ink_count(&frame(&mut e, &mut s)), base, "复制不动画面");
+
+    // 粘贴 → 浮动（原位）→ 移动 20px → 提交：墨量近似翻倍
+    assert!(e.paste_float());
+    assert!(e.transforming());
+    e.transform_translate(20.0, 8.0);
+    let hist = e.document().history().undo_len();
+    assert!(e.commit_transform());
+    assert_eq!(e.document().history().undo_len(), hist + 1);
+    let doubled = ink_count(&frame(&mut e, &mut s));
+    assert!(
+        doubled > base * 19 / 10,
+        "粘贴后墨量应翻倍: {doubled} vs {base}"
+    );
+
+    // 一次撤销 → 回到粘贴前
+    assert!(e.undo());
+    assert!(ink_count(&frame(&mut e, &mut s)) >= base - 4, "撤销粘贴");
+}
+
+#[test]
+fn clipboard_cut_restores_via_undo() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 30.0, 32.0);
+    let base = ink_count(&frame(&mut e, &mut s));
+    assert!(e.cut_selection());
+    assert_eq!(ink_count(&frame(&mut e, &mut s)), 0, "剪切后清空");
+    assert!(e.has_clipboard(), "剪切同时入剪贴板");
+    assert!(e.undo());
+    assert!(
+        ink_count(&frame(&mut e, &mut s)) >= base - 4,
+        "撤销剪切复原"
+    );
+}
+
+#[test]
+fn clipboard_paste_external_png() {
+    let (mut e, mut s) = engine();
+    // 4×4 红色 PNG（直行）
+    let mut rgba = vec![0u8; 4 * 4 * 4];
+    for px in rgba.as_chunks_mut::<4>().0 {
+        px.copy_from_slice(&[200, 40, 40, 255]);
+    }
+    let png = paint_core::io::encode_png(&rgba, 4, 4).unwrap();
+
+    assert!(e.paste_image_float(&png));
+    assert!(e.transforming());
+    assert!(e.commit_transform());
+    // 画布上应有红色墨迹（视野中心的 4×4）
+    let f = frame(&mut e, &mut s);
+    let red = f
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|p| p[0] > 150 && p[1] < 100 && p[3] == 255)
+        .count();
+    assert!(red >= 16, "外部图像粘贴出现: {red}");
+}
+
+#[test]
+fn clipboard_paste_rgba_premultiplies() {
+    let (mut e, mut s) = engine();
+    // 半透明红直行 (255,0,0,128)：预乘后 R=128
+    let rgba = vec![255u8, 0, 0, 128];
+    assert!(e.paste_rgba_float(&rgba, 1, 1));
+    assert!(e.commit_transform());
+    let f = frame(&mut e, &mut s); // 白底：红 128 叠白 → ~(191,127,127)
+    let hit = f
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|p| p[0] > 240 && p[1] > 90 && p[1] < 170 && p[3] == 255);
+    assert!(hit, "半透明红应出现在视野中心附近");
+}
+
+#[test]
+fn clipboard_blocked_during_transform() {
+    let (mut e, _s) = engine();
+    draw(&mut e, 10.0, 30.0, 32.0);
+    assert!(e.begin_transform());
+    assert!(!e.copy_selection(), "变换中禁复制");
+    assert!(!e.paste_float(), "变换中禁粘贴");
+    assert!(!e.paste_image_float(b"junk"), "变换中禁外部粘贴");
+    e.cancel_transform();
+    assert!(e.copy_selection(), "取消后恢复");
+}
