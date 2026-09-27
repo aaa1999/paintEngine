@@ -136,6 +136,17 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "x" || e.key === "X") { e.preventDefault(); $("sym").click(); }
 });
 
+// 画布尺寸
+$("canvasPreset").onchange = () => {
+  const v = $("canvasPreset").value;
+  if (!v) { app.clear_canvas(); $("status").textContent = "画布: 无限"; }
+  else {
+    const [w, h] = v.split(",").map(Number);
+    app.set_canvas(w, h);
+    $("status").textContent = `画布: ${w}×${h}`;
+  }
+};
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {

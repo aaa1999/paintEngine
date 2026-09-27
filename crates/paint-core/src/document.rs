@@ -16,6 +16,8 @@ pub struct Document {
     selection: Option<crate::tile::TileGrid>,
     /// 内容级变换中的浮动层（合成时叠加渲染于全部图层之上）。
     floating: Option<crate::float::Floating>,
+    /// 固定画布尺寸（None = 无限画布）。原点恒为 (0,0)。
+    canvas: Option<crate::geometry::Rect>,
 }
 
 impl Document {
@@ -31,6 +33,7 @@ impl Document {
             show_grid: false,
             selection: None,
             floating: None,
+            canvas: None,
         }
     }
 
@@ -45,7 +48,16 @@ impl Document {
             show_grid: false,
             selection: None,
             floating: None,
+            canvas: None,
         }
+    }
+
+    pub fn canvas(&self) -> Option<crate::geometry::Rect> {
+        self.canvas
+    }
+
+    pub fn set_canvas(&mut self, rect: Option<crate::geometry::Rect>) {
+        self.canvas = rect;
     }
 
     pub fn floating(&self) -> Option<&crate::float::Floating> {

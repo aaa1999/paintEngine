@@ -897,6 +897,15 @@ impl ApplicationHandler for App {
                                 self.engine.brush_mut().stabilizer = next;
                                 println!("稳定器: {next:.0}");
                             }
+                            "c" | "C" if ctrl && shift => {
+                                if self.engine.canvas_bounds().is_some() {
+                                    self.engine.clear_canvas();
+                                    println!("画布: 无限");
+                                } else {
+                                    self.engine.set_canvas(1920, 1080);
+                                    println!("画布: 1920×1080");
+                                }
+                            }
                             "x" | "X" => {
                                 let name = self.engine.cycle_symmetry();
                                 println!("对称: {name}");

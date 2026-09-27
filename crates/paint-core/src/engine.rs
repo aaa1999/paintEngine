@@ -274,6 +274,28 @@ impl Engine {
         self.symmetry.name()
     }
 
+    // ── 画布尺寸 ──
+
+    /// 设置固定画布尺寸（像素，原点 (0,0)）。w=0 或 h=0 清除（恢复无限画布）。
+    pub fn set_canvas(&mut self, w: u32, h: u32) {
+        if w == 0 || h == 0 {
+            self.doc.set_canvas(None);
+        } else {
+            self.doc.set_canvas(Some(Rect::new(0, 0, w, h)));
+        }
+        self.dirty = Dirty::All;
+    }
+
+    /// 清除画布尺寸（恢复无限画布）。
+    pub fn clear_canvas(&mut self) {
+        self.doc.set_canvas(None);
+        self.dirty = Dirty::All;
+    }
+
+    pub fn canvas_bounds(&self) -> Option<Rect> {
+        self.doc.canvas()
+    }
+
     /// 吸管取色：读合成帧缓冲的屏幕像素（Alt+点击）。
     pub fn pick_color(&self, x: u32, y: u32) -> Option<Color> {
         let (w, h) = self.size;
@@ -1341,7 +1363,9 @@ impl Engine {
         transparent: bool,
     ) -> Option<Vec<u8>> {
         let scale = scale.max(0.01) as f64;
-        let bounds = bounds.or_else(|| self.visible_content_bounds())?;
+        let bounds = bounds
+            .or_else(|| self.canvas_bounds())
+            .or_else(|| self.visible_content_bounds())?;
         let w = ((bounds.w as f64) * scale).ceil().max(1.0) as u32;
         let h = ((bounds.h as f64) * scale).ceil().max(1.0) as u32;
         if w > 16384 || h > 16384 {
@@ -1371,7 +1395,9 @@ impl Engine {
     /// 色带），量化到 u16 输出。`bounds: None` = 可见内容包围盒。
     pub fn export_png16(&mut self, bounds: Option<Rect>, scale: f32) -> Option<Vec<u8>> {
         let scale = scale.max(0.01) as f64;
-        let bounds = bounds.or_else(|| self.visible_content_bounds())?;
+        let bounds = bounds
+            .or_else(|| self.canvas_bounds())
+            .or_else(|| self.visible_content_bounds())?;
         let w = ((bounds.w as f64) * scale).ceil().max(1.0) as u32;
         let h = ((bounds.h as f64) * scale).ceil().max(1.0) as u32;
         if w > 16384 || h > 16384 {

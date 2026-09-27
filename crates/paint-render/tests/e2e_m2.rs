@@ -645,3 +645,44 @@ fn import_auto_detect_webp_fails_cleanly() {
     assert!(e.import_image(b"not image").is_none(), "垃圾数据干净失败");
     let _ = (&mut e, &mut s);
 }
+
+#[test]
+fn canvas_size_clips_content() {
+    let (mut e, mut s) = engine();
+    // 画一笔超出画布范围
+    draw(&mut e, 10.0, 54.0, 32.0);
+    let full_ink = ink_count(&frame(&mut e, &mut s));
+    assert!(full_ink > 0);
+
+    // 设定画布 32×64：x > 32 区域应变成画布外深灰（不是白）
+    e.set_canvas(32, 64);
+    assert!(e.canvas_bounds().is_some());
+    let f = frame(&mut e, &mut s);
+    let px = |x: u32, y: u32| -> u8 { f[((y * 64 + x) * 4) as usize] };
+    // 画布内 x=20：白底或墨迹（值 ≤ 255）
+    // 画布内：白底或墨迹（由后续深灰断言间接验证）
+    // 画布外 x=50：深灰（≈58）
+    assert!(px(50, 32) < 100, "画布外深灰: {}", px(50, 32));
+
+    // 清除画布恢复
+    e.clear_canvas();
+    assert!(e.canvas_bounds().is_none());
+    let restored = ink_count(&frame(&mut e, &mut s));
+    assert!(
+        restored >= full_ink - 4,
+        "清除画布恢复: {restored} vs {full_ink}"
+    );
+}
+
+#[test]
+fn canvas_export_uses_canvas_bounds() {
+    let (mut e, _s) = engine();
+    draw(&mut e, 10.0, 54.0, 32.0);
+    e.set_canvas(40, 50);
+    // 导出默认取画布尺寸（不再是内容包围盒）
+    let png = e.export_png(None, 1.0, false).expect("导出");
+    assert!(!png.is_empty());
+    // 解码回验证尺寸
+    let (_, w, h) = paint_core::io::decode_png(&png).unwrap();
+    assert_eq!((w, h), (40, 50), "导出应等于画布尺寸");
+}

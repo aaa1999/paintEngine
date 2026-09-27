@@ -448,6 +448,27 @@ impl PaintApp {
         self.inner.borrow().engine.symmetry().name().to_string()
     }
 
+    /// 画布尺寸。
+    pub fn set_canvas(&self, w: u32, h: u32) {
+        self.mark_render(|e| {
+            e.set_canvas(w, h);
+            true
+        });
+    }
+    pub fn clear_canvas(&self) {
+        self.mark_render(|e| {
+            e.clear_canvas();
+            true
+        });
+    }
+    pub fn canvas_bounds(&self) -> Option<Vec<f64>> {
+        self.inner
+            .borrow()
+            .engine
+            .canvas_bounds()
+            .map(|r| vec![r.x as f64, r.y as f64, r.w as f64, r.h as f64])
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

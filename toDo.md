@@ -18,7 +18,7 @@
 
 - [ ] **CI 管线** — GitHub Actions：测试矩阵（native + wasm32 + Android 交叉编译）+ clippy 零容忍 + fmt 检查。当前全靠本地手跑。
 - [x] **对称绘画** — 水平/垂直/双轴/径向（N 分旋转）镜像；引擎 SymmetryMode + dab 展开副本；桌面 X 键循环 / Web 按钮；各向异性角度同步翻转。
-- [ ] **画布尺寸** — "文档大小"设定（特定尺寸导出/打印）。当前只有无限画布，无固定文档概念。
+- [x] **画布尺寸** — Document.canvas 字段（Option<Rect>）；合成器画布外深灰/画布内正常背景/图层裁剪到画布/1px 边框；导出默认取画布尺寸；桌面 Ctrl+Shift+C 切换/Web 下拉预设（1080p/2K/4K/A4/方形）。
 - [x] **WebGPU 启用** — paint-wasm `--features gpu` 启用（GPU 尝试 → CPU 回退）；仅增 120KB（2.74 vs 2.61MB）。注意：浏览器 WebGPU 初始化是异步的，pollster block_on 在部分浏览器可能不工作；实际性能提升需在 Chrome 113+ 验证。
 
 ## 🔧 中等工程（各 1-3 天）

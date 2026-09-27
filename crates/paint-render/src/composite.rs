@@ -31,14 +31,43 @@ pub fn composite(
         return;
     };
 
+    // 画布尺寸模式：画布外深灰 + 画布内背景 + 图层裁剪到画布
+    let canvas_clip: Option<Rect>;
     if let Some(bg) = background {
-        paint_background(bg, target, width, &clip);
-        if doc.show_grid() {
-            paint_grid(doc, target, width, &clip);
+        if let Some(canvas) = doc.canvas() {
+            // 画布外深灰
+            paint_background_outside(target, width, &clip);
+            // 画布内正常背景
+            if let Some(inner) = canvas.intersect(&full) {
+                if let Some(c2) = inner.intersect(&clip) {
+                    paint_background(bg, target, width, &c2);
+                    if doc.show_grid() {
+                        paint_grid(doc, target, width, &c2);
+                    }
+                }
+            }
+            canvas_clip = canvas.intersect(&full);
+        } else {
+            paint_background(bg, target, width, &clip);
+            if doc.show_grid() {
+                paint_grid(doc, target, width, &clip);
+            }
+            canvas_clip = None;
+        }
+    } else {
+        // 透明导出路径
+        if let Some(canvas) = doc.canvas() {
+            canvas_clip = canvas.intersect(&full);
+        } else {
+            canvas_clip = None;
         }
     }
     if let Some(sel) = doc.selection() {
         paint_selection_outline(doc, sel, target, width, &clip);
+    }
+    // 画布边框
+    if let Some(canvas) = doc.canvas() {
+        paint_canvas_border(doc, &canvas, target, width, &clip);
     }
     if let Some(f) = doc.floating() {
         paint_floating(doc, f, target, width, &clip);
@@ -58,6 +87,11 @@ pub fn composite(
     let row_base_x = (0.5 - pan_x) * inv_zoom;
     let step_x = if ident { inv_zoom } else { f64::NAN };
 
+    // 画布模式下图层只画到画布内
+    let layer_clip = match &canvas_clip {
+        Some(c) => c.intersect(&clip).unwrap_or(Rect::new(0, 0, 0, 0)),
+        None => clip,
+    };
     let all_layers: Vec<&paint_core::layer::Layer> = doc.layers().iter().collect();
     for (li, layer) in all_layers
         .iter()
@@ -76,7 +110,7 @@ pub fn composite(
         } else {
             None
         };
-        for y in clip.y..(clip.y + clip.h as i32) {
+        for y in layer_clip.y..(layer_clip.y + layer_clip.h as i32) {
             let py = y as f64 + 0.5 - pan_y;
             let cx_row_ident = row_base_x + clip.x as f64 * step_x;
 
@@ -98,7 +132,7 @@ pub fn composite(
             let mut cache: Option<&TileData> = None;
 
             let mut cx_ident = cx_row_ident;
-            for x in clip.x..(clip.x + clip.w as i32) {
+            for x in layer_clip.x..(layer_clip.x + layer_clip.w as i32) {
                 let (cx_cur, cy_cur) = if ident {
                     let v = cx_ident;
                     cx_ident += step_x;
@@ -522,6 +556,64 @@ fn paint_grid(doc: &Document, target: &mut [u8], width: u32, clip: &Rect) {
             }
         }
         cy += spacing;
+    }
+}
+
+/// 画布外区域深灰（#3a3a3e）。
+fn paint_background_outside(target: &mut [u8], width: u32, clip: &Rect) {
+    for y in clip.y..(clip.y + clip.h as i32) {
+        let row = (y as u32 * width) as usize * 4;
+        let start = row + clip.x as usize * 4;
+        let end = start + clip.w as usize * 4;
+        let mut i = start;
+        while i < end {
+            target[i] = 58;
+            target[i + 1] = 58;
+            target[i + 2] = 62;
+            target[i + 3] = 255;
+            i += 4;
+        }
+    }
+}
+
+/// 画布边框：1px 白线（画布边缘，最近邻到屏幕）。
+fn paint_canvas_border(doc: &Document, canvas: &Rect, target: &mut [u8], width: u32, clip: &Rect) {
+    let vp = doc.viewport();
+    let _zoom = vp.zoom();
+    let (_pan_x, _pan_y) = vp.pan();
+    // 画布四边（画布坐标 → 屏幕）
+    let (x0, y0) = (canvas.x as f64, canvas.y as f64);
+    let (x1, y1) = (canvas.x2() as f64, canvas.y2() as f64);
+    let edges = [
+        ((x0, y0), (x1, y0)),
+        ((x1, y0), (x1, y1)),
+        ((x1, y1), (x0, y1)),
+        ((x0, y1), (x0, y0)),
+    ];
+    for (a, b) in edges {
+        let (ax, ay) = vp.canvas_to_screen(a.0, a.1);
+        let (bx, by) = vp.canvas_to_screen(b.0, b.1);
+        // 简易线段光栅化（步进）
+        let len = ((bx - ax).hypot(by - ay)).max(1.0);
+        let steps = (len as u32).max(2);
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let sx = (ax + (bx - ax) * t) as i32;
+            let sy = (ay + (by - ay) * t) as i32;
+            if sx >= clip.x
+                && sx < clip.x + clip.w as i32
+                && sy >= clip.y
+                && sy < clip.y + clip.h as i32
+            {
+                let idx = (sy as usize * width as usize + sx as usize) * 4;
+                if idx + 3 < target.len() {
+                    target[idx] = 200;
+                    target[idx + 1] = 200;
+                    target[idx + 2] = 205;
+                    target[idx + 3] = 255;
+                }
+            }
+        }
     }
 }
 
