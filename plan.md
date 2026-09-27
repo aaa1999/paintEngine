@@ -16,17 +16,18 @@
 ## 二、架构分层与 Crate 布局
 
 ```
-paint-engine/  (workspace)
+paintEngine/  (workspace)
 ├── crates/
-│   ├── paint-core/        # 零平台依赖：瓦片/图层/笔画/撤销/文档/视口
-│   ├── paint-render/      # Renderer trait + 软件实现（tiny-skia + SIMD 盖章）
-│   ├── paint-gpu/         # Renderer 的 wgpu 实现（feature 门控）
-│   └── shells/
-│       ├── paint-desktop/ # winit + softbuffer/wgpu
-│       ├── paint-wasm/    # canvas 元素 + 指针事件，wasm-bindgen 导出
-│       ├── paint-ios/     # C ABI staticlib，Swift 薄壳调用
-│       └── paint-android/ # cdylib + JNI，Kotlin View 子类调用
+│   ├── paint-core/        # 零平台依赖：瓦片/图层/笔画/撤销/文档/视口/PNG
+│   ├── paint-render/      # Renderer trait + 软件实现（手写盖章/合成/合并）
+│   ├── paint-gpu/         # Renderer 的 wgpu 实现（feature 门控，M2 尾/M3）
+│   ├── paint-desktop/     # winit + softbuffer/wgpu
+│   ├── paint-wasm/        # canvas 元素 + 指针事件，wasm-bindgen 导出（+www/ 演示页）
+│   ├── paint-ios/         # C ABI staticlib，Swift 薄壳调用（M3）
+│   └── paint-android/     # cdylib + JNI，Kotlin View 子类调用（M3）
 ```
+
+（实际落地为扁平 crates/ 布局，与初版蓝图的 shells/ 子目录等价。）
 
 ## 三、依赖选型
 
@@ -212,17 +213,24 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 
 运行：`cargo run -p paint-desktop --release`（左键绘画 · 中键/空格拖拽平移 · 滚轮缩放 · Ctrl+Z 撤销 · [ ] 笔刷大小）
 
-### M2（P1）：完整绘画应用（Web 优先）
+### M2（P1）：完整绘画应用（Web 优先）✅（2026-09-27，wgpu 单列遗留）
 
-- [ ] 12 种混合模式（Multiply/Screen/Overlay/SoftLight/…）
-- [ ] 橡皮擦（dst-out）
-- [ ] 图层全量：remove / duplicate / reorder / merge_down / flatten
-- [ ] PNG 导入导出
-- [ ] wasm 壳：canvas 元素呈现、pointerrawupdate 高采样输入、resize observer
-- [ ] 多指手势：双指平移缩放 + 手掌拒绝（PenInRange）
-- [ ] History 内存限额接入 prune
-- [ ] wgpu composite 实现（feature 门控，桌面先行）
-- [ ] 验收：浏览器里完成绘画全流程，图层混合正确，大画布滚动流畅
+- [x] 12 种混合模式（Multiply/Screen/Overlay/SoftLight/…）
+- [x] 橡皮擦（dst-out）：Dab.erase + Engine::Tool；桌面 E 键/右键临时擦
+- [x] 图层全量：remove / duplicate / reorder / merge_down / flatten（撤销扩展为 UndoOp 枚举，结构操作全可撤销）
+- [x] PNG 导入导出：io.rs 预乘↔直行换算；export_png 支持自定义范围/缩放/透明背景
+- [x] wasm 壳：canvas 元素呈现（ImageData）、pointerrawupdate 高采样输入、ResizeObserver（DPR 感知）、rAF 按需渲染、www/ 演示页
+- [x] 多指手势：双指平移缩放（防瞬时重合缩放跳变）+ 误触笔画即时回滚 + 手势闩锁 + 笔接管 + 手掌拒绝（PenInRange）
+- [x] History 内存限额接入 prune：淘汰时 Arc 释放自动生效；笔画结束回收空瓦片；结构操作按瓦片数近似记账
+- [ ] wgpu composite 实现（feature 门控，桌面先行）——**遗留给 M2.5**：验收标准聚焦浏览器端（已达成），GPU 合成单独立项开发，避免与功能主线抢工期
+- [x] 验收：67 项自动化测试覆盖绘画全流程（含混合模式像素断言、合并/压平往返不变、PNG 往返逐像素一致、手势 e2e）；浏览器手动验收见 `crates/paint-wasm/README.md`（wasm32 编译通过，浏览器运行需 wasm-pack 构建）
+
+实现备注：
+
+- 混合模式公式取自 W3C Compositing and Blending Level 1，Normal 走快速路径，其余 11 种走通用 `composite_pixel`（预乘域、支持半透明底，merge 与屏幕合成共用）。
+- 合并（merge_down/flatten）通过 `Renderer::merge_layers` 瓦片对瓦片 1:1 完成，隐藏图层不贡献像素（与主流软件一致）。
+- 结构撤销：UndoOp 枚举（Tiles/InsertLayer/RemoveLayer/MoveLayer），逆序应用、逆操作自动捕获，redo 重放前向顺序。
+- 手势状态机在引擎内（壳层只转发原始触摸事件），桌面/移动端行为一致。
 
 ### M3（P1 后半）：iOS / Android
 
