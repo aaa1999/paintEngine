@@ -28,7 +28,38 @@ paint-engine/  (workspace)
 │       └── paint-android/ # cdylib + JNI，Kotlin View 子类调用
 ```
 
-## 三、API 蓝图
+## 三、依赖选型
+
+现成轮子只用于**光栅化与平台接入**两层；引擎核心（瓦片/图层/笔刷/撤销）全部手写——Rust 生态没有现成的平铺绘画引擎内核，这部分即本项目本体。
+
+### 选用清单
+
+| Crate | 引入时机 | 用在哪 | 干什么 | 选择理由 |
+|---|---|---|---|---|
+| `tiny-skia` | M1 | paint-render | 软件光栅化：路径填充/描边、抗锯齿、图像采样 | Skia 子集的纯 Rust 移植，resvg 作者维护，无 C 依赖，四端交叉编译无痛 |
+| `winit` | M1 | paint-desktop | 桌面窗口 + 事件循环 | 桌面三端窗口事实标准 |
+| `softbuffer` | M1 | paint-desktop / paint-wasm | 把 CPU 像素缓冲呈现到窗口/canvas | 纯 CPU 路线不碰 GPU API 即可上屏 |
+| `wgpu` | M2 | paint-gpu | GPU 抽象层：合成走 Vulkan/Metal/DX12/WebGPU | Rust 图形事实标准，桌面到 wasm 一套 API |
+| `wasm-bindgen` + `web-sys` | M2 | paint-wasm | JS 互操作、canvas 元素、指针事件 | wasm 事实标准 |
+| `png` | M2 | IO | PNG 编解码 | 只需 PNG，不拖整个 image 生态 |
+| `zip` | M4 | 存档 | OpenRaster(.ora) 容器读写 | .ora 本质是 zip + XML + 每层一个 PNG |
+
+M1 实际仅引入 `tiny-skia` / `winit` / `softbuffer` 三个，依赖面很小。
+
+### 考虑过但放弃
+
+| 方案 | 放弃理由 |
+|---|---|
+| `skia-safe`（Skia 官方绑定） | 功能最全，但带巨大 C++ 构建链，iOS/Android/wasm 交叉编译痛苦，与"四端一份核心"目标冲突 |
+| `raqote` | 同为纯 Rust 光栅化，但维护强度弱于 tiny-skia |
+| `vello` / `lyon` | GPU 矢量渲染路线；本项目矢量需求占小头，合成与盖章才是主战场 |
+| `femtovg` | OpenGL 系 GPU 画布，后端覆盖不如 wgpu，定位偏 UI 而非位图合成 |
+| `image` | 全家桶过重，只需 PNG 就引 `png` |
+| `glam` / `euclid` | 变换矩阵与 2D 几何量小且语义特殊（预乘 alpha、瓦片坐标），手写更可控 |
+
+文字渲染库 `swash` vs `cosmic-text` 的选型推迟到 M4（见"暂缓与待议"）。
+
+## 四、API 蓝图
 
 ### 1. 瓦片与文档（paint-core, P0）
 
@@ -149,14 +180,14 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 // 分层存档采用 OpenRaster (.ora) 标准格式（P2），不自造格式
 ```
 
-## 四、关键设计判断
+## 五、关键设计判断
 
 - **双后端切分顺序**：wgpu 先做"合成"（`composite`），笔刷盖章（`stamp_dabs`）仍走 CPU。GPU 盖章需要 compute + 避免回读，复杂度高一个量级；CPU 盖章 + GPU 合成的混合形态已能拿到大画布流畅滚动的收益。
 - **输入归一化的坑**：Web 端需要 `pointerrawupdate` 拿高采样率输入；Android 的 `MotionEvent` 必须展开 `getHistorical*` 批量历史点。这就是 `PointerSample.t_us` 存在的原因——两个平台都会一次给一串不同时间戳的采样。
 - **坐标分工**：平台事件只带视口坐标，对画布坐标系一无所知；`Viewport` 负责全部换算。旋转、翻转以后只动这一个模块。
 - **颜色**：全链路 RGBA8 预乘 alpha，sRGB；16 位深色 P3 以后再议。
 
-## 五、里程碑
+## 六、里程碑
 
 ### M1（P0）：桌面可画、可撤销
 
@@ -200,7 +231,7 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 - [ ] 选区（套索/矩形）
 - [ ] 文字工具与矢量形状
 
-## 六、暂缓与待议
+## 七、暂缓与待议
 
 - 文字渲染（字体库选型 swash vs cosmic-text）：M4 再定
 - 自定义工程格式：倾向只用 OpenRaster，不另造
