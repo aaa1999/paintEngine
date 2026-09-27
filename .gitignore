@@ -10,6 +10,9 @@
 
 # Android 构建产物（jniLibs 由 NDK 交叉编译产出，见 crates/paint-android/README.md）
 /crates/paint-android/android/app/src/main/jniLibs/**/*.so
+/crates/paint-android/android/app/build/
+/crates/paint-android/android/build/
+/crates/paint-android/android/.gradle/
 
 # OS
 .DS_Store
@@ -18,3 +21,5 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+.gradle/
+local.properties

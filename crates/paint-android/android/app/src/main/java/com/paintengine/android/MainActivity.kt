@@ -7,14 +7,13 @@ import android.provider.MediaStore
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
 import java.io.OutputStream
 
 /**
  * paintEngine Android 演示 Activity。
  * 顶部画布 + 底部工具栏：画笔/橡皮/撤销/重做/存 PNG。
  */
-class MainActivity : AppCompatActivity() {
+class MainActivity : android.app.Activity() {
 
     private lateinit var paintView: PaintEngineView
 

@@ -144,7 +144,7 @@ class PaintEngineView @JvmOverloads constructor(
 
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         // 数位笔悬停 → PenInRange（手掌拒绝）
-        if (handle != 0L && event.toolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
+        if (handle != 0L && event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_HOVER_ENTER,
                 MotionEvent.ACTION_HOVER_MOVE,

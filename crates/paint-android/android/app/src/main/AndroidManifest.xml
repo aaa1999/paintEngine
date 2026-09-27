@@ -3,7 +3,7 @@
 
     <application
         android:label="paintEngine"
-        android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:allowBackup="false">
         <activity
             android:name=".MainActivity"

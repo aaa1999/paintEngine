@@ -22,10 +22,19 @@ cp target/$TARGET/release/libpaint_android.so \
 （x86_64 模拟器同理：target 换 `x86_64-linux-android`，jniLibs 换 `x86_64/`。
 若已安装 cargo-ndk，可直接 `cargo ndk -t arm64-v8k -o <jniLibs> build --release -p paint-android`。）
 
-### 2. 用 Android Studio 打开 `android/` 目录
+### 2. 构建 APK（已含 gradle wrapper，无需 Android Studio）
 
-直接 Sync + Run。首次打开会自动生成 gradle wrapper 与下载依赖。
-无 Android Studio 时：`cd android && gradle assembleDebug`（需本机 gradle ≥ 8.7）。
+```bash
+cd crates/paint-android/android
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.paintengine.android/.MainActivity
+```
+
+工具链组合：Gradle 9.7 + AGP 9.0（内置 Kotlin 支持，无需单独 kotlin 插件）+
+compileSdk 35 + 纯框架 UI（无 androidx 运行时依赖，APK ≈ 2.5MB）。
+`local.properties` 指向本机 SDK 路径（已 gitignore，按需修改）。
+Android Studio 打开 `android/` 目录亦可直接 Run。
 
 ## 行为说明
 
