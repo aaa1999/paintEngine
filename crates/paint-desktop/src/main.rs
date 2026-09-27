@@ -897,6 +897,10 @@ impl ApplicationHandler for App {
                                 self.engine.brush_mut().stabilizer = next;
                                 println!("稳定器: {next:.0}");
                             }
+                            "x" | "X" => {
+                                let name = self.engine.cycle_symmetry();
+                                println!("对称: {name}");
+                            }
                             "v" | "V" => {
                                 let infos = self.engine.layer_infos();
                                 let active = self.engine.active_layer_id().unwrap_or(u64::MAX);

@@ -20,6 +20,12 @@ use paint_core::render::{EngineConfig, Surface};
 use paint_core::{BlendMode, Color, Engine, PlatformEvent, Rect, Tool};
 use paint_render::SoftwareRenderer;
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+}
+
 type PointerClosure = Closure<dyn FnMut(PointerEvent)>;
 type IdleClosure = Closure<dyn FnMut()>;
 type WheelClosure = Closure<dyn FnMut(web_sys::WheelEvent)>;
@@ -58,7 +64,23 @@ impl PaintApp {
             .ok_or(JsValue::from_str("无法获取 2d 上下文"))?
             .dyn_into()?;
 
-        let engine = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+        // GPU 尝试（WebGPU/WebGL 可用时），失败回退 CPU
+        #[cfg(feature = "gpu")]
+        let renderer: Box<dyn paint_core::render::Renderer> = {
+            match paint_gpu::WgpuRenderer::new() {
+                Some(r) => {
+                    crate::log("GPU 渲染器已启用");
+                    Box::new(r)
+                }
+                None => {
+                    crate::log("GPU 不可用，回退 CPU 渲染器");
+                    Box::new(SoftwareRenderer::new())
+                }
+            }
+        };
+        #[cfg(not(feature = "gpu"))]
+        let renderer: Box<dyn paint_core::render::Renderer> = Box::new(SoftwareRenderer::new());
+        let engine = Engine::new(renderer, EngineConfig::default());
         let inner = Rc::new(RefCell::new(Inner {
             engine,
             canvas: canvas.clone(),
@@ -413,6 +435,17 @@ impl PaintApp {
             .unwrap_or(-1.0);
         inner.needs_render.set(true);
         r
+    }
+
+    /// 对称绘画。
+    pub fn cycle_symmetry(&self) -> String {
+        let mut inner = self.inner.borrow_mut();
+        let name = inner.engine.cycle_symmetry().to_string();
+        inner.needs_render.set(true);
+        name
+    }
+    pub fn symmetry_name(&self) -> String {
+        self.inner.borrow().engine.symmetry().name().to_string()
     }
 
     pub fn toggle_layer_mask(&self) -> bool {

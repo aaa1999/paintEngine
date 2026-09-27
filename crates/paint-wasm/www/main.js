@@ -126,6 +126,16 @@ try {
 } catch (e) {}
 refreshPresets();
 
+// 对称绘画
+$("sym").onclick = () => {
+  const name = app.cycle_symmetry();
+  $("sym").classList.toggle("active", name !== "关");
+  $("status").textContent = `对称: ${name}`;
+};
+window.addEventListener("keydown", (e) => {
+  if (e.key === "x" || e.key === "X") { e.preventDefault(); $("sym").click(); }
+});
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {

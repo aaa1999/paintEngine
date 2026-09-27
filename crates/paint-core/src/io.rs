@@ -237,12 +237,7 @@ pub fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let mut rgba = vec![0u8; n * 4];
     match info.pixel_format {
         jpeg_decoder::PixelFormat::L8 => {
-            for (d, s) in rgba
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(pixels.iter())
-            {
+            for (d, s) in rgba.as_chunks_mut::<4>().0.iter_mut().zip(pixels.iter()) {
                 d[0] = *s;
                 d[1] = *s;
                 d[2] = *s;

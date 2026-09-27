@@ -2147,6 +2147,7 @@ version = "0.1.0"
 dependencies = [
  "js-sys",
  "paint-core",
+ "paint-gpu",
  "paint-render",
  "wasm-bindgen",
  "web-sys",
