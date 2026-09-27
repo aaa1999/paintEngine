@@ -397,6 +397,20 @@ impl Engine {
         self.tool = tool;
     }
 
+    /// 合成帧缓冲的可变访问（呈现前叠加 UI 用）。
+    pub fn frame_mut(&mut self) -> Option<&mut [u8]> {
+        if self.frame.is_empty() {
+            None
+        } else {
+            Some(&mut self.frame)
+        }
+    }
+
+    /// 帧尺寸。
+    pub fn frame_size(&self) -> (u32, u32) {
+        self.size
+    }
+
     pub fn dirty(&self) -> Dirty {
         self.dirty
     }

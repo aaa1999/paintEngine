@@ -73,6 +73,8 @@ fn decode_png_straight(png: &[u8], out: &mut Vec<u8>) -> Option<(usize, usize)> 
     Some((w as usize, h as usize))
 }
 
+mod panel;
+
 fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut app = App::new();
@@ -109,6 +111,7 @@ struct App {
     tool_before_erase: Option<paint_core::Tool>,
     /// 按需重绘：任何输入/焦点/尺寸事件置位，画完即清。
     needs_redraw: bool,
+    layer_panel: panel::Panel,
 }
 
 impl App {
@@ -137,6 +140,7 @@ impl App {
             cursor: (0.0, 0.0),
             t_us: 0,
             tool_before_erase: None,
+            layer_panel: panel::Panel::new(),
             needs_redraw: true,
         }
     }
@@ -160,8 +164,15 @@ impl App {
                 let _ = sb.resize(w, h);
             }
         }
-        self.engine
-            .handle_event(PlatformEvent::Resize { w, h, scale });
+        // 引擎只渲染画布区域（右侧留给面板）
+        let engine_w = w.saturating_sub(panel::PANEL_W);
+        if engine_w > 0 && h > 0 {
+            self.engine.handle_event(PlatformEvent::Resize {
+                w: engine_w,
+                h,
+                scale,
+            });
+        }
     }
 
     /// 数字键 1-9 快捷色板。
@@ -418,12 +429,56 @@ impl App {
             return;
         };
         let size = window.inner_size();
-        let mut target = SoftbufferTarget {
-            sb,
-            w: size.width,
-            h: size.height,
-        };
-        self.engine.render(&mut target);
+        let (win_w, win_h) = (size.width, size.height);
+        let engine_size = self.engine.frame_size();
+
+        // 1) 引擎渲染画布帧
+        {
+            let mut target = SoftbufferTarget {
+                sb,
+                w: engine_size.0,
+                h: engine_size.1,
+            };
+            self.engine.render(&mut target);
+        }
+
+        // 2) 拼接面板帧 + 全宽呈现
+        if win_w > engine_size.0 {
+            // 面板画到临时全宽帧
+            let mut full_frame = vec![38u8; (win_w * win_h * 4) as usize];
+            // 拷贝引擎帧
+            if let Some(ef) = self.engine.frame_mut() {
+                for y in 0..engine_size.1.min(win_h) {
+                    let src_row = (y * engine_size.0 * 4) as usize;
+                    let dst_row = (y * win_w * 4) as usize;
+                    let copy_len = (engine_size.0 * 4) as usize;
+                    full_frame[dst_row..dst_row + copy_len]
+                        .copy_from_slice(&ef[src_row..src_row + copy_len]);
+                }
+            }
+            // 画面板（写 full_frame 右侧）
+            self.layer_panel
+                .draw(&self.engine, &mut full_frame, win_w, win_h);
+
+            // 呈现全宽帧
+            let Ok(mut buffer) = sb.buffer_mut() else {
+                return;
+            };
+            for (dst, src) in buffer.iter_mut().zip(full_frame.as_chunks::<4>().0) {
+                *dst = u32::from_le_bytes(*src);
+            }
+            let _ = buffer.present();
+        } else {
+            // 无面板空间：直接呈现引擎帧
+            let mut target = SoftbufferTarget {
+                sb,
+                w: engine_size.0,
+                h: engine_size.1,
+            };
+            // engine.render 已在上方完成——但 present 由 SoftbufferTarget
+            // 内部处理；此处只需再次触发（帧未变则 skip 合成）
+            self.engine.render(&mut target);
+        }
         self.needs_redraw = false;
     }
 }
