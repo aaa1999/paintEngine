@@ -8,3 +8,4 @@ edition.workspace = true
 png = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
+swash = "0.1"

@@ -16,6 +16,7 @@ pub mod io;
 pub mod layer;
 pub mod ora;
 pub mod render;
+pub mod shape;
 pub mod stroke;
 pub mod tile;
 pub mod viewport;

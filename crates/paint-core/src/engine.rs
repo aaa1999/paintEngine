@@ -248,6 +248,90 @@ impl Engine {
         r
     }
 
+    // ── 文字与矢量形状（写入活动图层，入撤销历史）──
+
+    /// 文字：字体字节由调用方提供（不内置字体，核心零资源依赖）。
+    /// `x, y` 为首字基线附近原点（画布坐标）。
+    pub fn draw_text(
+        &mut self,
+        font: &[u8],
+        text: &str,
+        x: i64,
+        y: i64,
+        size: f32,
+    ) -> Option<Rect> {
+        let layer = self.doc.layers().try_active()?;
+        let color = self.brush.color;
+        let mut recorder = StrokeRecorder::new(layer);
+        let grid = &mut self.doc.layers_mut().get_mut(layer).tiles;
+        let bounds = crate::shape::draw_text(grid, &mut recorder, font, text, x, y, size, color);
+        if bounds.is_some() {
+            self.doc.commit(recorder.finish("Text"));
+            self.dirty = Dirty::All;
+        }
+        bounds
+    }
+
+    pub fn fill_rect(&mut self, rect: Rect) -> bool {
+        self.run_shape(|w| w.fill_rect(rect))
+    }
+
+    pub fn fill_ellipse(&mut self, cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
+        self.run_shape(move |w| w.fill_ellipse(cx, cy, rx, ry))
+    }
+
+    pub fn stroke_ellipse(&mut self, cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
+        self.run_shape(move |w| w.stroke_ellipse(cx, cy, rx, ry))
+    }
+
+    /// 直线（dab 链，用当前笔刷参数）。
+    pub fn stroke_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) -> bool {
+        let layer = match self.doc.layers().try_active() {
+            Some(l) => l,
+            None => return false,
+        };
+        let b = self.brush.clone();
+        let dabs = crate::shape::line_dabs(
+            x0,
+            y0,
+            x1,
+            y1,
+            b.size / 2.0,
+            b.hardness,
+            b.color,
+            b.flow.clamp(0.01, 1.0),
+        );
+        let recorder = StrokeRecorder::new(layer);
+        // 复用笔画盖章通道（含选区裁剪与撤销采集）
+        self.stroke = Some(ActiveStroke {
+            state: StrokeState::new(x0, y0, 1.0),
+            recorder,
+            layer,
+            pointer: 0,
+        });
+        self.stamp(layer, &dabs);
+        let act = self.stroke.take().unwrap();
+        self.doc.commit(act.recorder.finish("Line"));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    fn run_shape(&mut self, f: impl FnOnce(&mut crate::shape::ShapeWriter)) -> bool {
+        let Some(layer) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let color = self.brush.color;
+        let mut recorder = StrokeRecorder::new(layer);
+        {
+            let grid = &mut self.doc.layers_mut().get_mut(layer).tiles;
+            let mut writer = crate::shape::ShapeWriter::new(grid, &mut recorder, color);
+            f(&mut writer);
+        }
+        self.doc.commit(recorder.finish("Shape"));
+        self.dirty = Dirty::All;
+        true
+    }
+
     // ── 选区（像素级裁剪笔画；不入撤销历史，与主流软件一致）──
 
     /// 是否有活动选区。

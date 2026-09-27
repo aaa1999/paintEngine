@@ -87,6 +87,7 @@ fn bench(name: &str, mut f: impl FnMut(&mut [u8])) -> f64 {
 }
 
 fn main() {
+    bench_stamp();
     let (w, h) = (2560u32, 1440u32);
     let full = Rect::new(0, 0, w, h);
 
@@ -114,5 +115,42 @@ fn main() {
         });
 
         println!("→ GPU/CPU 全量比: {:.2}x", gpu_ms / cpu_ms);
+    }
+}
+
+/// CPU 盖章微基准：模拟真实笔画的 dab 流。
+fn bench_stamp() {
+    use paint_core::stroke::{Dab, DabMode};
+    println!("── CPU 盖章（软件标量路径）──");
+    for &(size, hz) in &[(12f32, 120u32), (30.0, 120), (80.0, 120), (200.0, 60)] {
+        let radius = size / 2.0;
+        let spacing = (size * 0.15).max(0.75) as f64;
+        let stroke_len = 1000.0f64; // 1 秒级笔画长度（px，按典型手速）
+        let n_dabs = (stroke_len / spacing) as usize;
+        let mut grid = paint_core::tile::TileGrid::new();
+        let dabs: Vec<Dab> = (0..n_dabs)
+            .map(|i| Dab {
+                x: 100.0 + i as f64 * spacing,
+                y: 500.0 + (i as f64 * 0.3).sin() * 20.0,
+                radius,
+                hardness: 0.5,
+                color: Color::BLACK,
+                alpha: 1.0,
+                mode: DabMode::Buildup,
+                erase: false,
+                tip: None,
+                scatter: 0.0,
+            })
+            .collect();
+        let mut rec = paint_core::history::StrokeRecorder::new(paint_core::LayerId::from_raw(0));
+        // 预热
+        paint_render::stamp_dabs(&mut grid, &dabs[..1.min(dabs.len())], None, &mut rec);
+        let t0 = std::time::Instant::now();
+        paint_render::stamp_dabs(&mut grid, &dabs, None, &mut rec);
+        let total = t0.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "size={size:>5.0} 半径={radius:>5.1} {n_dabs:>5} dabs/笔 → 总 {total:>7.2} ms，帧均({hz}Hz) {:+.2} ms",
+            total * hz as f64 / 120.0
+        );
     }
 }

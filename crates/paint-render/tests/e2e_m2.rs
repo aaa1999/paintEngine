@@ -308,3 +308,26 @@ fn lasso_selection_polygon_fill() {
     let (_, far_out) = row(40);
     assert_eq!(far_out, 0, "三角形外不可画");
 }
+
+#[test]
+fn shapes_undoable_and_clipped() {
+    let (mut e, mut s) = engine();
+    // 矩形填充入撤销
+    assert!(e.fill_rect(Rect::new(10, 10, 20, 20)));
+    assert_eq!(e.document().history().undo_len(), 1);
+    let f1 = frame(&mut e, &mut s);
+    let ink1 = ink_count(&f1);
+    assert!(ink1 > 0);
+    assert!(e.undo());
+    assert_eq!(ink_count(&frame(&mut e, &mut s)), 0, "形状可撤销");
+
+    // 直线：dab 链
+    assert!(e.stroke_line(10.0, 30.0, 50.0, 30.0));
+    let ink2 = ink_count(&frame(&mut e, &mut s));
+    assert!(ink2 > 0);
+    assert!(e.undo());
+
+    // 椭圆
+    assert!(e.fill_ellipse(32.0, 32.0, 12.0, 8.0));
+    assert!(ink_count(&frame(&mut e, &mut s)) > 0);
+}
