@@ -246,7 +246,7 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 
 - [ ] paint-ios：C ABI staticlib + Swift 薄壳（UIView 子类、Pencil 事件、Metal/CPU 呈现）——**待议**：方案与时点由后续讨论决定
 - [x] paint-android：cdylib + JNI + Kotlin View 子类、MotionEvent 历史点展开（2026-09-27）
-- [ ] Android 真机验收（需真机/模拟器实测；Rust 侧已通过 aarch64 + x86_64 交叉编译与 JNI 符号核对）
+- [x] Android 真机验收（2026-09-27）：APK（2.5MB，双架构引擎）安装至联想 23049RAD8C 真机与 x86_64 模拟器——启动无崩溃、点阵网格渲染、触摸绘画、撤销、保存 PNG 到相册、适应内容（笔画中心 538,1136 ≈ 画布中心 540,1150）全部通过；真机手工体验项（手指/笔压感、双指手势、笔悬停手掌拒绝）待实际使用确认
 
 Android 实现备注：
 
