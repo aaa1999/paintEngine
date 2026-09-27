@@ -382,6 +382,27 @@ impl PaintApp {
         r
     }
 
+    /// 通用图像导入（PNG/JPEG/WebP 自动识别）。
+    pub fn import_image(&self, data: Vec<u8>) -> f64 {
+        let mut inner = self.inner.borrow_mut();
+        let r = inner
+            .engine
+            .import_image(&data)
+            .map(|v| v as f64)
+            .unwrap_or(-1.0);
+        inner.needs_render.set(true);
+        r
+    }
+
+    /// JPEG 导出（quality 0-100）。
+    pub fn export_jpeg(&self, quality: u8) -> Vec<u8> {
+        self.inner
+            .borrow_mut()
+            .engine
+            .export_jpeg(None, 1.0, quality)
+            .unwrap_or_default()
+    }
+
     /// SVG 导入。
     pub fn import_svg(&self, svg: Vec<u8>, scale: f32) -> f64 {
         let mut inner = self.inner.borrow_mut();

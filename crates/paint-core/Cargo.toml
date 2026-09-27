@@ -10,6 +10,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 roxmltree = "0.20"
 swash = "0.1"
 resvg = { version = "0.45", optional = true }
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.6"
+image-webp = "0.2"
 
 [features]
 default = ["svg"]

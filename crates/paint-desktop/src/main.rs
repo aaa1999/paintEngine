@@ -351,18 +351,31 @@ impl App {
         }
     }
 
-    fn open_svg(&mut self) {
+    fn open_image(&mut self) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("SVG 图像", &["svg"])
+            .add_filter("图像文件", &["png", "jpg", "jpeg", "webp", "svg", "ora"])
             .pick_file()
         else {
             return;
         };
-        match std::fs::read_to_string(&path) {
-            Ok(svg) => match self.engine.import_svg(svg.as_bytes(), 1.0) {
-                Some(_) => println!("已导入 SVG {}", path.display()),
-                None => eprintln!("SVG 解析失败: {}", path.display()),
-            },
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let ok = match ext.as_str() {
+                    "svg" => self.engine.import_svg(&bytes, 1.0).is_some(),
+                    "ora" => self.engine.load_ora(&bytes),
+                    _ => self.engine.import_image(&bytes).is_some(),
+                };
+                if ok {
+                    println!("已导入 {}", path.display());
+                } else {
+                    eprintln!("导入失败: {}", path.display());
+                }
+            }
             Err(e) => eprintln!("读取失败: {e}"),
         }
     }
@@ -825,7 +838,7 @@ impl ApplicationHandler for App {
                                 self.engine.select_all();
                             }
                             "i" | "I" if ctrl => {
-                                self.open_svg();
+                                self.open_image();
                             }
                             "o" | "O" if ctrl => {
                                 self.open_ora();

@@ -224,3 +224,171 @@ mod tests16 {
         assert!(png.len() > 50, "16-bit PNG 应比 8-bit 大");
     }
 }
+
+/// JPEG 解码 → 预乘 RGBA。CMYK JPEG 转为 RGB。
+pub fn decode_jpeg(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    let pixels = decoder
+        .decode()
+        .map_err(|e| format!("JPEG 解码失败: {e}"))?;
+    let info = decoder.info().ok_or("JPEG 无元信息")?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    let n = (w as usize) * (h as usize);
+    let mut rgba = vec![0u8; n * 4];
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::L8 => {
+            for (d, s) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.iter())
+            {
+                d[0] = *s;
+                d[1] = *s;
+                d[2] = *s;
+                d[3] = 255;
+            }
+        }
+        jpeg_decoder::PixelFormat::RGB24 => {
+            for (d, s) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<3>().0)
+            {
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+                d[3] = 255;
+            }
+        }
+        jpeg_decoder::PixelFormat::CMYK32 => {
+            // CMYK → RGB（简化：无 ICC）
+            for (d, s) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(pixels.as_chunks::<4>().0)
+            {
+                let c = s[0] as u32;
+                let m = s[1] as u32;
+                let y = s[2] as u32;
+                let k = s[3] as u32;
+                d[0] = (255 - (c * (255 - k) / 255 + k).min(255)) as u8;
+                d[1] = (255 - (m * (255 - k) / 255 + k).min(255)) as u8;
+                d[2] = (255 - (y * (255 - k) / 255 + k).min(255)) as u8;
+                d[3] = 255;
+            }
+        }
+        _ => return Err(format!("不支持的 JPEG 像素格式: {:?}", info.pixel_format)),
+    }
+    // 直行 → 预乘（JPEG 无 alpha，跳过）
+    Ok((rgba, w, h))
+}
+
+/// JPEG 编码（quality 0-100）。输入为预乘 RGBA（alpha 被忽略——JPEG 无透明）。
+pub fn encode_jpeg(premul: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, String> {
+    if w == 0 || h == 0 {
+        return Err("空图像".into());
+    }
+    let n = (w as usize) * (h as usize);
+    if premul.len() < n * 4 {
+        return Err("缓冲过小".into());
+    }
+    // 预乘 → RGB（JPEG 无 alpha）
+    let mut rgb = vec![0u8; n * 3];
+    for (d, s) in rgb
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+        .zip(premul.as_chunks::<4>().0)
+    {
+        d[0] = s[0];
+        d[1] = s[1];
+        d[2] = s[2];
+    }
+    let mut out = Vec::new();
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
+    encoder
+        .encode(&rgb, w as u16, h as u16, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| format!("JPEG 编码失败: {e}"))?;
+    Ok(out)
+}
+
+/// WebP 解码 → 预乘 RGBA。
+pub fn decode_webp(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(bytes))
+        .map_err(|e| format!("WebP 解析失败: {e}"))?;
+    let (w, h) = decoder.dimensions();
+    let n = (w as usize) * (h as usize);
+    let mut rgba = vec![0u8; n * 4];
+    decoder
+        .read_image(&mut rgba)
+        .map_err(|e| format!("WebP 解码失败: {e}"))?;
+    // image-webp 输出直行 RGBA → 预乘
+    for px in rgba.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        for c in px.iter_mut().take(3) {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+    Ok((rgba, w, h))
+}
+
+/// 自动识别格式解码（PNG / JPEG / WebP）→ 预乘 RGBA。
+pub fn decode_auto(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    if bytes.len() < 12 {
+        return Err("数据过短".into());
+    }
+    // PNG 魔数: 89 50 4E 47
+    if bytes[..4] == [0x89, 0x50, 0x4E, 0x47] {
+        return decode_png(bytes);
+    }
+    // JPEG 魔数: FF D8 FF
+    if bytes[..3] == [0xFF, 0xD8, 0xFF] {
+        return decode_jpeg(bytes);
+    }
+    // WebP: "RIFF" + ... + "WEBP"
+    if bytes[..4] == *b"RIFF" && bytes.len() >= 12 && bytes[8..12] == *b"WEBP" {
+        return decode_webp(bytes);
+    }
+    Err("无法识别图像格式（支持 PNG/JPEG/WebP）".into())
+}
+
+#[cfg(test)]
+mod jpeg_webp_tests {
+    use super::*;
+
+    #[test]
+    fn jpeg_roundtrip() {
+        // 8×8 红 → JPEG → 解码回：红通道高、蓝绿低
+        let mut premul = vec![0u8; 8 * 8 * 4];
+        for px in premul.as_chunks_mut::<4>().0 {
+            px.copy_from_slice(&[220, 30, 30, 255]);
+        }
+        let jpg = encode_jpeg(&premul, 8, 8, 95).unwrap();
+        assert!(!jpg.is_empty());
+        assert_eq!(&jpg[..3], &[0xFF, 0xD8, 0xFF], "JPEG 魔数");
+        let (rgba, w, h) = decode_jpeg(&jpg).unwrap();
+        assert_eq!((w, h), (8, 8));
+        // 中心像素：红高（JPEG 有损但红通道应 >150）
+        assert!(rgba[0] > 150, "红通道: {}", rgba[0]);
+        assert!(rgba[1] < 100, "绿通道: {}", rgba[1]);
+    }
+
+    #[test]
+    fn decode_auto_detects() {
+        // PNG
+        let png = encode_png(&[255, 0, 0, 255], 1, 1).unwrap();
+        let (rgba, _, _) = decode_auto(&png).unwrap();
+        assert_eq!(rgba[3], 255);
+        // JPEG
+        let jpg = encode_jpeg(&[0, 0, 0, 255, 0, 0, 0, 255], 2, 1, 90).unwrap();
+        let (_, _, _) = decode_auto(&jpg).unwrap();
+        // 垃圾数据
+        assert!(decode_auto(b"not an image").is_err());
+    }
+}

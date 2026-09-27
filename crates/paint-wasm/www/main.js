@@ -360,6 +360,17 @@ $("oraFile").onchange = async (e) => {
   e.target.value = "";
 };
 
+$("exportJpg").onclick = () => {
+  const bytes = app.export_jpeg(92);
+  if (!bytes.length) { $("status").textContent = "画布为空"; return; }
+  const blob = new Blob([new Uint8Array(bytes)], { type: "image/jpeg" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "painting.jpg";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $("status").textContent = "已导出 JPG";
+};
 $("export").onclick = () => {
   const bytes = app.export_png();
   const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });

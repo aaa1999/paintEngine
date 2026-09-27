@@ -612,3 +612,36 @@ fn svg_import_invalid_fails_cleanly() {
     assert!(e.import_svg(b"not svg at all", 1.0).is_none());
     let _ = (&mut e, &mut s);
 }
+
+#[test]
+fn jpeg_export_import_roundtrip() {
+    let (mut e, mut s) = engine();
+    draw(&mut e, 10.0, 50.0, 32.0);
+    let ink = ink_count(&frame(&mut e, &mut s));
+    assert!(ink > 0);
+
+    // JPEG 导出
+    let jpg = e.export_jpeg(None, 1.0, 95).expect("JPEG 导出");
+    assert!(!jpg.is_empty());
+    assert_eq!(&jpg[..3], &[0xFF, 0xD8, 0xFF], "JPEG 魔数");
+
+    // JPEG 导入为新图层
+    e.undo(); // 清掉原笔画
+    let id = e.import_image(&jpg).expect("JPEG 导入");
+    assert!(id > 0);
+    let ink2 = ink_count(&frame(&mut e, &mut s));
+    // JPEG 有损但应保留大部分墨迹
+    assert!(ink2 > 0, "JPEG 导入应有像素");
+}
+
+#[test]
+fn import_auto_detect_webp_fails_cleanly() {
+    let (mut e, mut s) = engine();
+    // 没有 WebP 测试文件——验证无效数据干净失败
+    assert!(
+        e.import_image(b"RIFF____WEBPjunk").is_none(),
+        "坏 WebP 干净失败"
+    );
+    assert!(e.import_image(b"not image").is_none(), "垃圾数据干净失败");
+    let _ = (&mut e, &mut s);
+}

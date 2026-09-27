@@ -262,6 +262,15 @@ Android 实现备注：
 - 实测修复三处 Web 壳缺陷：rAF 循环自引用断链（首帧 panic）、部分 webview 不派发 ResizeObserver（构造时同步 + 每帧廉价检查兜底）、个别 webview 不派发 rAF（16ms setInterval 兜底节拍）。
 - 桌面壳按需重绘（事件驱动，空闲零开销）；合成器双线性采样（zoom>1，瓦片内钳位防接缝；1:1 与缩小保持最近邻）。
 
+### M4.12 JPEG/WebP 导入导出（2026-09-27）
+
+- [x] io.rs：`decode_jpeg`（L8/RGB24/CMYK32 全支持）、`encode_jpeg`（quality 0-100）、`decode_webp`（直行→预乘）、`decode_auto`（PNG/JPEG/WebP 魔数自动识别）
+- [x] Engine：`import_image`（自动识别格式→瓦片→新图层）、`export_jpeg`（有损压缩导出）
+- [x] 桌面 Ctrl+I：统一图像文件对话框（.png/.jpg/.jpeg/.webp/.svg/.ora 按扩展名分发）
+- [x] Web：导入 accept 扩展（.png/.jpg/.jpeg/.webp）+ JPG 导出按钮（quality 92）
+- [x] 依赖纯 Rust（jpeg-decoder/jpeg-encoder/image-webp），wasm 兼容
+- [x] 测试 4 项：JPEG 往返（编码→魔数→解码→红通道断言）、自动识别（PNG/JPEG/垃圾数据）、e2e 导出导入往返、坏 WebP 干净失败
+
 ### M4.11 SVG 导入（2026-09-27）
 
 - [x] Engine::import_svg：resvg 光栅化（re-export usvg/tiny_skia 零额外依赖面）→ 预乘 RGBA → 瓦片 → 新图层（置于视野中心，可变换定位）；`scale` 参数控制渲染分辨率

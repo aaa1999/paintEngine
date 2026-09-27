@@ -1278,6 +1278,25 @@ impl Engine {
         crate::io::encode_png16(&f32_buf, w, h).ok()
     }
 
+    /// 导入图像（自动识别 PNG/JPEG/WebP）→ 瓦片 → 新图层。
+    pub fn import_image(&mut self, bytes: &[u8]) -> Option<u64> {
+        let (premul, w, h) = crate::io::decode_auto(bytes).ok()?;
+        self.insert_pixels_as_layer(&premul, w, h)
+    }
+
+    /// JPEG 导出（有损，quality 0-100）。`transparent: false` 时白底合成。
+    pub fn export_jpeg(
+        &mut self,
+        bounds: Option<Rect>,
+        scale: f32,
+        quality: u8,
+    ) -> Option<Vec<u8>> {
+        let png = self.export_png(bounds, scale, false)?;
+        // export_png 输出直行 PNG → 解码回预乘 → 编码 JPEG
+        let (premul, w, h) = crate::io::decode_png(&png).ok()?;
+        crate::io::encode_jpeg(&premul, w, h, quality).ok()
+    }
+
     /// 导入 SVG：resvg 光栅化 → 瓦片 → 新图层（置于视野中心）。
     /// `scale` 控制渲染分辨率（1.0 = SVG 原始尺寸）。
     #[cfg(feature = "svg")]
