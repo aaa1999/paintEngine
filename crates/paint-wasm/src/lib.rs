@@ -469,6 +469,25 @@ impl PaintApp {
             .map(|r| vec![r.x as f64, r.y as f64, r.w as f64, r.h as f64])
     }
 
+    /// 滤镜。
+    pub fn apply_invert(&self) -> bool {
+        self.mark_render(|e| e.apply_filter(paint_core::filter::Filter::Invert))
+    }
+    pub fn apply_grayscale(&self) -> bool {
+        self.mark_render(|e| e.apply_filter(paint_core::filter::Filter::Grayscale))
+    }
+    pub fn apply_blur(&self, radius: u32) -> bool {
+        self.mark_render(|e| e.apply_filter(paint_core::filter::Filter::Blur { radius }))
+    }
+    pub fn apply_brightness_contrast(&self, brightness: f32, contrast: f32) -> bool {
+        self.mark_render(|e| {
+            e.apply_filter(paint_core::filter::Filter::BrightnessContrast {
+                brightness,
+                contrast,
+            })
+        })
+    }
+
     pub fn toggle_layer_mask(&self) -> bool {
         self.mark_render(|e| e.toggle_layer_mask())
     }

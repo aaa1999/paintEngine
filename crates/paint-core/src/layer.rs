@@ -77,6 +77,8 @@ pub struct Layer {
     pub mask: Option<TileGrid>,
     /// 剪贴层：本层有效 alpha 受下方第一个非剪贴层的像素 alpha 约束。
     pub clipped: bool,
+    /// 图层组标签（同名层属于同组，UI 折叠显示/批量操作）。
+    pub group: Option<String>,
 }
 
 impl Layer {
@@ -89,6 +91,7 @@ impl Layer {
             tiles: TileGrid::new(),
             mask: None,
             clipped: false,
+            group: None,
         }
     }
 }
@@ -256,6 +259,45 @@ impl LayerStack {
     /// 自底向上的 (id, layer) 迭代。
     pub fn iter_with_id(&self) -> impl Iterator<Item = (LayerId, &Layer)> {
         self.entries.iter().map(|e| (e.id, &e.layer))
+    }
+
+    /// 设置图层组标签。
+    pub fn set_group(&mut self, id: LayerId, group: Option<String>) {
+        if let Some(l) = self.try_get_mut(id) {
+            l.group = group;
+        }
+    }
+
+    /// 批量设置组内图层可见性。
+    pub fn set_group_visible(&mut self, group: &str, visible: bool) -> usize {
+        let mut n = 0;
+        for e in &mut self.entries {
+            if e.layer.group.as_deref() == Some(group) {
+                e.layer.visible = visible;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// 组内图层 id 列表。
+    pub fn group_layers(&self, group: &str) -> Vec<LayerId> {
+        self.entries
+            .iter()
+            .filter(|e| e.layer.group.as_deref() == Some(group))
+            .map(|e| e.id)
+            .collect()
+    }
+
+    /// 所有组名（有序去重）。
+    pub fn group_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .entries
+            .iter()
+            .filter_map(|e| e.layer.group.clone())
+            .collect();
+        names.dedup();
+        names
     }
 }
 

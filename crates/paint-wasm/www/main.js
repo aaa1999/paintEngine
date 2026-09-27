@@ -147,6 +147,11 @@ $("canvasPreset").onchange = () => {
   }
 };
 
+// 滤镜
+$("fxInvert").onclick = () => { if (app.apply_invert()) $("status").textContent = "已反色"; };
+$("fxGray").onclick = () => { if (app.apply_grayscale()) $("status").textContent = "已灰度"; };
+$("fxBlur").onclick = () => { if (app.apply_blur(8)) $("status").textContent = "已模糊 r=8"; };
+
 // 图层面板
 const BLEND_NAMES = app.blend_mode_names();
 function refreshLayers() {
@@ -170,7 +175,8 @@ function refreshLayers() {
     // 名
     const name = document.createElement("span");
     name.className = "lName";
-    name.textContent = li.name + (li.clipped ? " ⧉" : "") + (li.hasMask ? " ◐" : "");
+    name.textContent = (li.group ? "  └ " : "") + li.name + (li.clipped ? " ⧉" : "") + (li.hasMask ? " ◐" : "");
+    if (li.group) { row.style.paddingLeft = "18px"; }
     row.appendChild(name);
     // 重排/删除
     const ops = document.createElement("span");

@@ -39,6 +39,7 @@ pub struct LayerInfo {
     pub blend_mode: BlendMode,
     pub clipped: bool,
     pub has_mask: bool,
+    pub group: Option<String>,
 }
 
 /// 对称绘画模式。轴/中心为画布坐标。
@@ -294,6 +295,61 @@ impl Engine {
 
     pub fn canvas_bounds(&self) -> Option<Rect> {
         self.doc.canvas()
+    }
+
+    // ── 图层组 ──
+
+    /// 设置活动图层的组标签（None = 退出组）。
+    pub fn set_layer_group(&mut self, group: Option<String>) {
+        if let Some(id) = self.doc.layers().try_active() {
+            self.doc.layers_mut().set_group(id, group);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    /// 切换组内所有图层可见性，返回受影响图层数。
+    pub fn toggle_group_visible(&mut self, group: &str) -> usize {
+        // 找组内任一层的当前可见性取反
+        let current = self
+            .doc
+            .layers()
+            .iter()
+            .find(|l| l.group.as_deref() == Some(group))
+            .map(|l| l.visible)
+            .unwrap_or(true);
+        let n = self.doc.layers_mut().set_group_visible(group, !current);
+        if n > 0 {
+            self.dirty = Dirty::All;
+        }
+        n
+    }
+
+    /// 组名列表。
+    pub fn group_names(&self) -> Vec<String> {
+        self.doc.layers().group_names()
+    }
+
+    /// 对活动图层（或选区内）应用滤镜。入撤销历史。
+    pub fn apply_filter(&mut self, filter: crate::filter::Filter) -> bool {
+        if self.transforming() {
+            return false;
+        }
+        let Some(layer_id) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let selection = self.doc.selection().cloned();
+        let mut recorder = StrokeRecorder::new(layer_id);
+        {
+            let l = self.doc.layers_mut().get_mut(layer_id);
+            crate::filter::apply_filter(l, layer_id, &filter, selection.as_ref(), &mut recorder);
+        }
+        self.doc.commit(recorder.finish("Filter"));
+        self.dirty = Dirty::All;
+        true
+    }
+
+    pub fn filter_names() -> Vec<&'static str> {
+        vec!["模糊", "亮度/对比度", "色相/饱和度", "反色", "灰度"]
     }
 
     /// 吸管取色：读合成帧缓冲的屏幕像素（Alt+点击）。
@@ -1154,6 +1210,7 @@ impl Engine {
                 blend_mode: l.blend_mode,
                 clipped: l.clipped,
                 has_mask: l.mask.is_some(),
+                group: l.group.clone(),
             })
             .collect()
     }

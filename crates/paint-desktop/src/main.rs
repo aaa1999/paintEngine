@@ -922,6 +922,12 @@ impl ApplicationHandler for App {
                                     );
                                 }
                             }
+                            "f" | "F" if !ctrl => {
+                                // 简易滤镜：反色（最直观）
+                                if self.engine.apply_filter(paint_core::filter::Filter::Invert) {
+                                    println!("已应用滤镜: 反色");
+                                }
+                            }
                             "g" | "G" => {
                                 let on = !self.engine.show_grid();
                                 self.engine.set_show_grid(on);
