@@ -8,6 +8,9 @@
 # wasm-pack 生成产物
 /crates/paint-wasm/www/pkg/
 
+# Android 构建产物（jniLibs 由 NDK 交叉编译产出，见 crates/paint-android/README.md）
+/crates/paint-android/android/app/src/main/jniLibs/**/*.so
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,13 @@
+[package]
+name = "paint-android"
+description = "Android 壳：JNI 绑定 + AndroidBitmap 锁像素呈现（cdylib）"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+paint-core = { path = "../paint-core" }
+paint-render = { path = "../paint-render" }
+jni = "0.21"
