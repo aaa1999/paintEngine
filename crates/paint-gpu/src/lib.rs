@@ -680,11 +680,7 @@ impl Renderer for WgpuRenderer {
         // 4) 回读脏区 → CPU
         let bpr_aligned = (region.w * 4).div_ceil(256) * 256;
         let buf_size = (bpr_aligned * region.h) as u64;
-        if self
-            .readback
-            .as_ref()
-            .is_none_or(|b| b.size() != buf_size)
-        {
+        if self.readback.as_ref().is_none_or(|b| b.size() != buf_size) {
             self.readback = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
                 size: buf_size,

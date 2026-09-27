@@ -135,6 +135,58 @@ impl App {
     }
 
     fn save_png(&mut self) {
+        let path = rfd::FileDialog::new()
+            .set_file_name("painting.png")
+            .add_filter("PNG 图像", &["png"])
+            .save_file();
+        let Some(path) = path else { return };
+        match self.engine.export_png(None, 1.0, false) {
+            Some(png) => match std::fs::write(&path, &png) {
+                Ok(()) => println!("已导出 {}", path.display()),
+                Err(e) => eprintln!("导出失败: {e}"),
+            },
+            None => eprintln!("画布为空，未导出"),
+        }
+    }
+
+    fn save_ora(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("painting.ora")
+            .add_filter("OpenRaster 工程", &["ora"])
+            .save_file()
+        else {
+            return;
+        };
+        match self.engine.save_ora() {
+            Some(bytes) => match std::fs::write(&path, &bytes) {
+                Ok(()) => println!("已保存 {}", path.display()),
+                Err(e) => eprintln!("保存失败: {e}"),
+            },
+            None => eprintln!("画布为空，未保存"),
+        }
+    }
+
+    fn open_ora(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("OpenRaster 工程", &["ora"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                if self.engine.load_ora(&bytes) {
+                    println!("已打开 {}", path.display());
+                } else {
+                    eprintln!("无法解析 {}", path.display());
+                }
+            }
+            Err(e) => eprintln!("读取失败: {e}"),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn legacy_save_png_auto(&mut self) {
         match self.engine.export_png(None, 1.0, false) {
             Some(png) => match std::fs::write("painting.png", &png) {
                 Ok(()) => println!("已导出 painting.png ({} KB)", png.len() / 1024),
@@ -347,8 +399,14 @@ impl ApplicationHandler for App {
                             "f" | "F" if ctrl => {
                                 self.engine.flatten();
                             }
-                            "s" | "S" if ctrl => {
+                            "s" | "S" if ctrl && shift => {
                                 self.save_png();
+                            }
+                            "s" | "S" if ctrl => {
+                                self.save_ora();
+                            }
+                            "o" | "O" if ctrl => {
+                                self.open_ora();
                             }
                             "0" if ctrl => {
                                 self.engine.fit_to_content(48.0);

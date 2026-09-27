@@ -105,6 +105,11 @@ impl TileGrid {
         self.tiles.keys().copied()
     }
 
+    /// (id, 瓦片) 迭代（ora 存档等需要遍历内容的场合）。
+    pub fn iter_entries(&self) -> impl Iterator<Item = (TileId, &TileRef)> + '_ {
+        self.tiles.iter().map(|(k, v)| (*k, v))
+    }
+
     /// 取可写瓦片，不存在则创建。若数据与撤销快照共享则先克隆（COW）。
     pub fn get_or_create_mut(&mut self, id: TileId) -> &mut TileData {
         let slot = self

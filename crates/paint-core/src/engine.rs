@@ -325,6 +325,38 @@ impl Engine {
         crate::io::encode_png(&buf, w, h).ok()
     }
 
+    // ── OpenRaster 工程存档 ──
+
+    /// 保存为 .ora（含合成图与缩略图）。
+    pub fn save_ora(&mut self) -> Option<Vec<u8>> {
+        let merged = self.export_png(None, 1.0, true)?;
+        let b = self.visible_content_bounds()?;
+        let scale = (256.0 / b.w as f64).min(256.0 / b.h as f64).min(1.0) as f32;
+        let thumb = self.export_png(Some(b), scale, true)?;
+        crate::ora::encode_ora(&self.doc, Some(&merged), Some(&thumb)).ok()
+    }
+
+    /// 载入 .ora 替换当前文档（历史重置）。
+    pub fn load_ora(&mut self, bytes: &[u8]) -> bool {
+        let Ok(ora) = crate::ora::decode_ora(bytes) else {
+            return false;
+        };
+        let layers = crate::ora::layers_from_ora(&ora);
+        let mut stack = crate::layer::LayerStack::new();
+        let mut ids = Vec::new();
+        for layer in layers {
+            let id = stack.alloc_id();
+            stack.insert_entry(stack.len(), id, layer);
+            ids.push(id);
+        }
+        if let Some(top) = ids.last() {
+            stack.set_active(*top);
+        }
+        self.doc = Document::with_layers(stack);
+        self.dirty = Dirty::All;
+        true
+    }
+
     /// 解码 PNG 并作为新图层插入（放在顶层，画布原点对齐）。
     pub fn import_png(&mut self, bytes: &[u8]) -> Option<LayerId> {
         let (data, iw, ih) = crate::io::decode_png(bytes).ok()?;

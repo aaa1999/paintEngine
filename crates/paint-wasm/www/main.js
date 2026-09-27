@@ -74,6 +74,31 @@ window.addEventListener("keydown", (e) => {
 });
 
 // 导入导出
+// 工程存档（.ora，保留图层/混合模式/不透明度）
+$("saveOra").onclick = () => {
+  const bytes = app.export_ora();
+  if (!bytes.length) { $("status").textContent = "画布为空"; return; }
+  const blob = new Blob([new Uint8Array(bytes)], { type: "image/openraster" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "painting.ora";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $("status").textContent = "已保存工程";
+};
+$("openOra").onclick = () => $("oraFile").click();
+$("oraFile").onchange = async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const data = new Uint8Array(await f.arrayBuffer());
+  if (app.import_ora(data)) {
+    $("status").textContent = `已打开工程（${app.layer_count()} 层）`;
+  } else {
+    $("status").textContent = "工程解析失败";
+  }
+  e.target.value = "";
+};
+
 $("export").onclick = () => {
   const bytes = app.export_png();
   const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });

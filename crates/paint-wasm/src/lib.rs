@@ -161,6 +161,20 @@ impl PaintApp {
         self.mark_render(|e| e.import_png(&data).is_some())
     }
 
+    /// 保存为 .ora 工程（下载用）。
+    pub fn export_ora(&self) -> Vec<u8> {
+        self.inner
+            .borrow_mut()
+            .engine
+            .save_ora()
+            .unwrap_or_default()
+    }
+
+    /// 载入 .ora 工程（替换当前文档）。
+    pub fn import_ora(&self, data: Vec<u8>) -> bool {
+        self.mark_render(|e| e.load_ora(&data))
+    }
+
     pub fn layer_count(&self) -> usize {
         self.inner.borrow().engine.document().layers().len()
     }

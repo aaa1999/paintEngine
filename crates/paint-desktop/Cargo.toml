@@ -13,6 +13,7 @@ paint-core = { path = "../paint-core" }
 paint-render = { path = "../paint-render" }
 winit = "0.30"
 softbuffer = "0.4"
+rfd = "0.15"
 
 [features]
 default = []

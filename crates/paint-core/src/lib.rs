@@ -14,6 +14,7 @@ pub mod history;
 pub mod input;
 pub mod io;
 pub mod layer;
+pub mod ora;
 pub mod render;
 pub mod stroke;
 pub mod tile;
