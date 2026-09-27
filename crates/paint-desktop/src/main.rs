@@ -74,7 +74,19 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        let engine = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+        #[cfg(feature = "gpu")]
+        let renderer: Box<dyn paint_core::render::Renderer> = {
+            match paint_gpu::WgpuRenderer::new() {
+                Some(r) => Box::new(r),
+                None => {
+                    eprintln!("wgpu 初始化失败，回退软件渲染");
+                    Box::new(SoftwareRenderer::new())
+                }
+            }
+        };
+        #[cfg(not(feature = "gpu"))]
+        let renderer: Box<dyn paint_core::render::Renderer> = Box::new(SoftwareRenderer::new());
+        let engine = Engine::new(renderer, EngineConfig::default());
         Self {
             window: None,
             context: None,

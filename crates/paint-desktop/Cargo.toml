@@ -13,3 +13,12 @@ paint-core = { path = "../paint-core" }
 paint-render = { path = "../paint-render" }
 winit = "0.30"
 softbuffer = "0.4"
+
+[features]
+default = []
+# M2.5：GPU 合成（CPU 盖章 + wgpu 合成混合形态）
+gpu = ["dep:paint-gpu"]
+
+[dependencies.paint-gpu]
+path = "../paint-gpu"
+optional = true

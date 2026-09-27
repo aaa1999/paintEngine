@@ -92,9 +92,10 @@ pub fn composite(
                 let d = row + x as usize * 4;
 
                 if bilinear {
-                    // 双线性：邻域钳位在当前瓦片内（边缘像素外推，无接缝）
-                    let (ax, bx, xi, xj) = bilerp_idx(fx);
-                    let (ay, by, yi, yj) = bilerp_idx(fy);
+                    // 双线性：锚点对齐标准纹理语义（texel i 在 L=i+0.5 满权重），
+                    // 与 GPU 采样器一致；邻域钳位在瓦片内（边缘外推，无接缝）
+                    let (ax, bx, xi, xj) = bilerp_idx(fx - 0.5);
+                    let (ay, by, yi, yj) = bilerp_idx(fy - 0.5);
                     let t = TILE as usize;
                     let i00 = (yi * t + xi) * 4;
                     let i10 = (yi * t + xj) * 4;
@@ -200,14 +201,30 @@ fn paint_grid(doc: &Document, target: &mut [u8], width: u32, clip: &Rect) {
     let (cx0, cy0) = vp.screen_to_canvas(clip.x as f64, clip.y as f64);
     let (cx1, cy1) = vp.screen_to_canvas(clip.x2() as f64, clip.y2() as f64);
 
+    // 判定窗口与 GPU 着色器一致：像素中心 ±0.5（开区间）
+    let hit = |s: f64, p: i64| -> bool {
+        // 与 GPU 着色器同精度（f32）：避免判定边界处两侧四舍五入不同
+        let d = (s as f32) - p as f32 - 0.5;
+        (-0.5..0.5).contains(&d)
+    };
     let mut cy = (cy0 / spacing).floor() * spacing;
     while cy <= cy1 {
-        let sy = (cy * zoom + pan_y).round() as i64;
-        if sy >= clip.y as i64 && sy < clip.y2() {
+        let sy_f = cy * zoom + pan_y;
+        let py_lo = ((sy_f - 0.5).floor() as i64).max(clip.y as i64);
+        let py_hi = ((sy_f + 0.5).ceil() as i64).min(clip.y2());
+        for sy in py_lo..py_hi {
+            if !hit(sy_f, sy) {
+                continue;
+            }
             let mut cx = (cx0 / spacing).floor() * spacing;
             while cx <= cx1 {
-                let sx = (cx * zoom + pan_x).round() as i64;
-                if sx >= clip.x as i64 && sx < clip.x2() {
+                let sx_f = cx * zoom + pan_x;
+                let px_lo = ((sx_f - 0.5).floor() as i64).max(clip.x as i64);
+                let px_hi = ((sx_f + 0.5).ceil() as i64).min(clip.x2());
+                for sx in px_lo..px_hi {
+                    if !hit(sx_f, sx) {
+                        continue;
+                    }
                     let i = ((sy as u32 * width) as usize + sx as usize) * 4;
                     if i + 3 < target.len() {
                         target[i] = dr;

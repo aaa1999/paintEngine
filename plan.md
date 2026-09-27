@@ -222,7 +222,7 @@ pub fn import_image_as_layer(doc: &mut Document, png: &[u8]) -> LayerId;
 - [x] wasm 壳：canvas 元素呈现（ImageData）、pointerrawupdate 高采样输入、ResizeObserver（DPR 感知）、rAF 按需渲染、www/ 演示页
 - [x] 多指手势：双指平移缩放（防瞬时重合缩放跳变）+ 误触笔画即时回滚 + 手势闩锁 + 笔接管 + 手掌拒绝（PenInRange）
 - [x] History 内存限额接入 prune：淘汰时 Arc 释放自动生效；笔画结束回收空瓦片；结构操作按瓦片数近似记账
-- [ ] wgpu composite 实现（feature 门控，桌面先行）——**遗留给 M2.5**：验收标准聚焦浏览器端（已达成），GPU 合成单独立项开发，避免与功能主线抢工期
+- [x] wgpu composite 实现（2026-09-27，M2.5 完成）：`paint-gpu` crate 提供 `WgpuRenderer`——CPU 盖章 + GPU 合成混合形态（盖章/合并委托软件路径）；瓦片纹理缓存按 Arc 指针身份增量上传、ping-pong 累积纹理跨帧保留支持脏区增量、12 种混合模式 WGSL 移植、点阵网格解析式着色、结果回读进引擎 CPU 帧缓冲（引擎与全部壳层零改动）；桌面端 `--features gpu` 启用（初始化失败自动回退软件）。验收：GPU↔CPU 合成逐像素对齐 5 项 parity 测试（全混合模式 ±2 / 双线性 ±12 / 网格 ≤1 点边界翻转 / 透明导出 / 脏区增量一致）。对齐过程修掉 CPU 双线性半像素锚点偏差（对齐标准纹理语义，Web/桌面 CPU 路径同步受益）
 - [x] 验收：67 项自动化测试覆盖绘画全流程（含混合模式像素断言、合并/压平往返不变、PNG 往返逐像素一致、手势 e2e）；浏览器手动验收见 `crates/paint-wasm/README.md`（wasm32 编译通过，浏览器运行需 wasm-pack 构建）
 
 实现备注：

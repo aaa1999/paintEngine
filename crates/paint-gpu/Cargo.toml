@@ -1,0 +1,12 @@
+[package]
+name = "paint-gpu"
+description = "Renderer 的 wgpu 实现：GPU 图层合成（盖章/合并仍走 CPU 软件路径）"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+paint-core = { path = "../paint-core" }
+paint-render = { path = "../paint-render" }
+wgpu = "27"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }

@@ -1410,6 +1410,7 @@ name = "paint-desktop"
 version = "0.1.0"
 dependencies = [
  "paint-core",
+ "paint-gpu",
  "paint-render",
  "softbuffer",
  "winit",
