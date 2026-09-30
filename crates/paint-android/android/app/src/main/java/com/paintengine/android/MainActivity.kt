@@ -53,11 +53,11 @@ class MainActivity : Activity() {
     private var shapeKindCode = PaintEngineView.TOOL_RECT
     private var shapeFill = false
 
-    // 帧率悬浮标签（设置项控制显隐）
-    private lateinit var fpsLabel: Button
+    // 性能状态块（FPS+MEM 两行，点击切换帧率监控）
+    private lateinit var fpsLabel: android.widget.LinearLayout
 
-    // 内存悬浮行（设置项控制；显示在 FPS 标签下方）
-    private lateinit var memLabel: Button
+    // 内存文本行（FPS 状态块内第二行，设置项控制）
+    private lateinit var memText: android.widget.TextView
 
     // 定位小地图（设置项控制显隐）
     private lateinit var minimapView: MinimapView
@@ -97,16 +97,24 @@ class MainActivity : Activity() {
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
             ),
         )
-        fpsLabel = Button(this).apply {
+        // 性能状态块：FPS + MEM 同一块（竖排两行，点击切换帧率监控）
+        val fpsText = android.widget.TextView(this).apply {
             text = "FPS --"
             setTextColor(android.graphics.Color.parseColor("#7FE388"))
-            setBackgroundColor(0x99000000.toInt())
-            setPadding(dp(8), dp(2), dp(8), dp(2))
             textSize = 11f
-            typeface = android.graphics.Typeface.MONOSPACE
-            minWidth = 0
-            minHeight = 0
-            stateListAnimator = null
+        }
+        memText = android.widget.TextView(this).apply {
+            text = ""
+            setTextColor(android.graphics.Color.parseColor("#7FB8E3"))
+            textSize = 10f
+            visibility = View.GONE
+        }
+        fpsLabel = android.widget.LinearLayout(this).apply {
+            addView(fpsText)
+            addView(memText)
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(0x99000000.toInt())
+            setPadding(dp(8), dp(3), dp(8), dp(3))
             val lp = android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
                 android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -124,30 +132,9 @@ class MainActivity : Activity() {
             .getBoolean("fps_monitor", true)) // 设置项默认开
         // 悬浮标签点击 = 快捷开关（正式入口在"设置"）
         fpsLabel.setOnClickListener { applyFpsMonitor(fpsLabel.visibility != View.VISIBLE) }
-        // 内存监控行（设置项控制；开启时显示在 FPS 下）
-        memLabel = Button(this).apply {
-            text = ""
-            setTextColor(android.graphics.Color.parseColor("#7FB8E3"))
-            setBackgroundColor(0x99000000.toInt())
-            setPadding(dp(8), dp(1), dp(8), dp(1))
-            textSize = 10f
-            typeface = android.graphics.Typeface.MONOSPACE
-            minWidth = 0
-            minHeight = 0
-            stateListAnimator = null
-            val lp = android.widget.FrameLayout.LayoutParams(
-                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
-            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
-            lp.leftMargin = dp(8)
-            lp.topMargin = dp(64) // FPS 标签下方
-            layoutParams = lp
-            visibility = View.GONE
-        }
         applyMemMonitor(getSharedPreferences("cfg", MODE_PRIVATE)
             .getBoolean("mem_monitor", false))
         stage.addView(fpsLabel)
-        stage.addView(memLabel)
         // 注意：不传 LayoutParams——WRAP_CONTENT 会让无内容测量的 View 铺满父容器
         // （ getDefaultSize AT_MOST 取 spec 尺寸），整个画布被半透明深底盖黑。
         // MinimapView init 里自设了 170dp 精确尺寸 + 右上角边距。
@@ -169,11 +156,11 @@ class MainActivity : Activity() {
                         lastCount = c
                         lastTime = now
                     }
-                    fpsLabel.text = "FPS ${"%.1f".format(smoothed)}"
-                    if (memLabel.visibility == View.VISIBLE) {
+                    fpsText.text = "FPS ${"%.1f".format(smoothed)}"
+                    if (memText.visibility == View.VISIBLE) {
                         val mr = paintView.memoryReport()
                         if (mr != null && mr.size >= 4) {
-                            memLabel.text = "MEM ${fmtBytes(mr[3])}（瓦片${fmtBytes(mr[0])} 撤销${fmtBytes(mr[1])}）"
+                            memText.text = "MEM ${fmtBytes(mr[3])}（瓦片${fmtBytes(mr[0])} 撤销${fmtBytes(mr[1])}）"
                         }
                     }
                     // 帧率进日志：每 5s 一条
@@ -777,8 +764,8 @@ class MainActivity : Activity() {
     private fun applyMemMonitor(on: Boolean) {
         getSharedPreferences("cfg", MODE_PRIVATE)
             .edit().putBoolean("mem_monitor", on).apply()
-        memLabel.visibility = if (on) View.VISIBLE else View.GONE
-        if (on) memLabel.text = "MEM --"
+        memText.visibility = if (on) View.VISIBLE else View.GONE
+        if (on) memText.text = "MEM --"
     }
 
     /** 字节数人性化：B/KB/MB/GB。 */
@@ -853,7 +840,7 @@ class MainActivity : Activity() {
             color = 0xEE2A2A2E.toInt()
         }
 
-        private val panelW = (170 * ctx.resources.displayMetrics.density).toInt()
+        private val panelW = (110 * ctx.resources.displayMetrics.density).toInt() // 小正方形
 
         init {
             val dp = ctx.resources.displayMetrics.density
@@ -911,7 +898,7 @@ class MainActivity : Activity() {
                     paddingTop + paddingBottom
             } else {
                 panelW
-            }.coerceIn((40 * dp).toInt(), (300 * dp).toInt())
+            }.coerceIn((40 * dp).toInt(), (110 * dp).toInt()) // 高度不超宽度（正方形内）
             setMeasuredDimension(panelW, h)
         }
 
