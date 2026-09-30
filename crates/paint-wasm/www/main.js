@@ -1,6 +1,6 @@
 // paintEngine Web 演示引导。
 // 前置：wasm-pack build crates/paint-wasm --target web --out-dir ../www/pkg
-import init, { PaintApp } from "./pkg/paint_wasm.js?v=12";
+import init, { PaintApp } from "./pkg/paint_wasm.js?v=28";
 
 const $ = (id) => document.getElementById(id);
 
@@ -336,7 +336,8 @@ function refreshLayers() {
     // 名
     const name = document.createElement("span");
     name.className = "lName";
-    name.textContent = (li.group ? "  └ " : "") + li.name + (li.clipped ? " ⧉" : "") + (li.hasMask ? " ◐" : "");
+    const soloMark = window.__soloId === li.id ? "▶单独 " : "";
+    name.textContent = (li.group ? "  └ " : "") + soloMark + li.name + (li.clipped ? " ⧉" : "") + (li.hasMask ? " ◐" : "");
     if (li.group) { row.style.paddingLeft = "18px"; }
     row.appendChild(name);
     // 重排/删除
@@ -355,8 +356,14 @@ function refreshLayers() {
       ops.appendChild(dn);
     }
     row.appendChild(ops);
-    // 选层
-    row.onclick = () => { app.select_layer_by_id(li.id); refreshLayers(); };
+    // 选层 + 单独显示切换（同层再点 = 恢复叠加）
+    row.onclick = () => {
+      app.select_layer_by_id(li.id);
+      window.__soloId = window.__soloId === li.id ? -1 : li.id;
+      const idx = infos.findIndex((x) => x.id === li.id);
+      app.set_solo_index(window.__soloId === -1 ? -1 : idx);
+      refreshLayers();
+    };
     list.appendChild(row);
     // 活动层的属性行（透明度/混合模式）
     if (li.id === active) {
@@ -397,6 +404,7 @@ $("lyDel").onclick = () => {
 };
 $("lyMerge").onclick = () => { app.merge_down(); refreshLayers(); };
 $("lyFlat").onclick = () => { app.flatten(); refreshLayers(); };
+$("lyAll").onclick = () => { window.__soloId = -1; app.set_solo_index(-1); refreshLayers(); };
 // 面板操作后刷新（笔刷操作改变层数时也刷新）
 const _origRefreshXbar = refreshXbar;
 refreshXbar = () => { _origRefreshXbar(); refreshLayers(); };
@@ -687,3 +695,16 @@ fpsBox.onclick = () => {
 };
 setInterval(refreshFpsBox, 500);
 refreshFpsBox();
+
+// ── 滚轮缩放交互期渲染：160ms 静止后关（引擎侧精化一帧）──
+{
+  let wheelIdleTimer = null;
+  window.addEventListener("wheel", () => {
+    if (window.app) app.set_interactive(true);
+    if (wheelIdleTimer) clearTimeout(wheelIdleTimer);
+    wheelIdleTimer = setTimeout(() => {
+      if (window.app) app.set_interactive(false);
+      wheelIdleTimer = null;
+    }, 160);
+  }, { capture: true, passive: true });
+}

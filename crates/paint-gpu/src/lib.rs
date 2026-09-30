@@ -1056,8 +1056,15 @@ impl Renderer for WgpuRenderer {
         // 2) 逐图层：复制 accum[cur]→accum[1-cur]（脏区内），再盖瓦片
         let layers_vec: Vec<(paint_core::LayerId, &paint_core::layer::Layer)> =
             doc.layers().iter_with_id().collect();
+        // 单独显示：solo 层存在时只画该层（与 CPU 合成同规则）
+        let solo = doc
+            .solo()
+            .filter(|s| layers_vec.iter().any(|(id, _)| *id == *s));
         for (li, (lid, layer)) in layers_vec.iter().enumerate() {
             if !layer.visible || layer.opacity <= 0.0 {
+                continue;
+            }
+            if solo.is_some() && Some(*lid) != solo {
                 continue;
             }
             let adj = layer.adjustment.unwrap_or_default();

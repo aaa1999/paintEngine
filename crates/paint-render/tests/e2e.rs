@@ -176,3 +176,98 @@ fn pan_zoom_redraw() {
     assert!(e.undo());
     assert!(!e.undo(), "历史耗尽");
 }
+
+/// 复刻 Web 序列：文字对象（raster）→ 新层 → 文字对象 → solo → render。
+/// 回归 wasm 上的 solo panic。
+#[test]
+fn solo_render_with_text_objects() {
+    let mut e = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+    e.handle_event(PlatformEvent::Resize { w: 64, h: 64, scale: 1.0 });
+    let raster = |c: u8| paint_core::layer::TextRaster {
+        premul: [[c, 0, 255 - c, 255u8]; 16].concat(),
+        w: 2,
+        h: 2,
+        dx: 0,
+        dy: 0,
+    };
+    assert!(e.add_text_object((10.0, 10.0), "R", 8.0, Some(raster(255))));
+    e.add_layer();
+    assert!(e.add_text_object((40.0, 40.0), "B", 8.0, Some(raster(0))));
+    let mut surf = TestSurface { frames: Vec::new() };
+    e.render(&mut surf);
+    e.set_solo_index(Some(1));
+    e.render(&mut surf);
+    e.set_solo_index(None);
+    e.render(&mut surf);
+    assert!(surf.frames.len() >= 3);
+}
+
+/// 复刻 Web 滚轮交互：interactive 渲染 + 连续 zoom_at + 每次后 render。
+/// 回归"滚轮即挂死"。
+#[test]
+fn interactive_zoom_render_loop() {
+    let mut e = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+    e.handle_event(PlatformEvent::Resize { w: 2048, h: 1024, scale: 1.0 });
+    let raster = paint_core::layer::TextRaster {
+        premul: vec![[60u8, 60, 60, 255]; 16].concat(),
+        w: 2,
+        h: 2,
+        dx: 0,
+        dy: 0,
+    };
+    e.add_text_object((300.0, 300.0), "A", 32.0, Some(raster));
+    e.set_interactive(true);
+    let mut surf = TestSurface { frames: Vec::new() };
+    for i in 0..40 {
+        let f = if i % 2 == 0 { 1.1 } else { 1.0 / 1.1 };
+        e.document_mut().viewport_mut().zoom_at((1024.0, 512.0), f);
+        e.render(&mut surf); // 挂死会超时
+    }
+    e.set_interactive(false);
+    e.render(&mut surf);
+    assert!(surf.frames.len() >= 40, "{}", surf.frames.len());
+}
+
+/// 交互期低清渲染性能基准：同序列开/关 interactive 的渲染耗时对比。
+#[test]
+fn interactive_lowres_benchmark() {
+    use std::time::Instant;
+    let mut e = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+    // 平板级分辨率（1880×3008 ≈ 5.6MP）
+    e.handle_event(PlatformEvent::Resize { w: 1880, h: 3008, scale: 1.0 });
+    let raster = paint_core::layer::TextRaster {
+        premul: vec![[60u8, 60, 60, 255]; 16].concat(),
+        w: 2, h: 2, dx: 0, dy: 0,
+    };
+    e.add_text_object((500.0, 800.0), "A", 32.0, Some(raster));
+    let mut surf = TestSurface { frames: Vec::new() };
+    let run = |e: &mut Engine, s: &mut TestSurface, inter: bool| -> f64 {
+        e.set_interactive(inter);
+        let t0 = Instant::now();
+        for i in 0..20 {
+            let f = if i % 2 == 0 { 1.1 } else { 1.0 / 1.1 };
+            e.document_mut().viewport_mut().zoom_at((940.0, 1504.0), f);
+            e.render(s);
+        }
+        t0.elapsed().as_secs_f64() / 20.0 * 1000.0 // 每帧毫秒
+    };
+    let full = run(&mut e, &mut surf, false);
+    let low = run(&mut e, &mut surf, true);
+    // 重场景：多层 + 放大（双线性路径）——贴近用户捏合缩放时
+    for l in 0..3 {
+        e.add_layer();
+        let raster = paint_core::layer::TextRaster {
+            premul: vec![[60u8, 60, 60, 255]; 16].concat(),
+            w: 2, h: 2, dx: (l * 40) as i64, dy: (l * 40) as i64,
+        };
+        e.add_text_object((300.0 + l as f64 * 200.0, 500.0), "X", 64.0, Some(raster));
+    }
+    e.document_mut().viewport_mut().set_zoom(4.0); // 放大 → 双线性
+    let heavy_full = run(&mut e, &mut surf, false);
+    let heavy_low = run(&mut e, &mut surf, true);
+    eprintln!(
+        "[bench] 空: {full:.1}→{low:.1}ms | 重(3层+4x双线性): {heavy_full:.1}→{heavy_low:.1}ms（{:.1}x）",
+        heavy_full / heavy_low
+    );
+    assert!(heavy_low < heavy_full, "重场景低清应更快: {heavy_full:.1} vs {heavy_low:.1}");
+}

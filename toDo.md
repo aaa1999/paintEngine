@@ -173,3 +173,43 @@
 - **埋点**：`Document::commit/undo/redo` 为骨架（每条可撤销操作一行：`[history] 提交 "Stroke"（触及 N 瓦片）`，debug 级）；引擎公开操作 info 级（工具切换/油漆桶/形状提交/文字对象增删改移/图层增删合并/滤镜/变换三段/导入导出含字节数与耗时/预设/文档切换）；壳层生命周期（onPause/自动保存跳过与完成/恢复）；**帧率每 5s 进日志**（Android info + 呈现计数；桌面 `[fps]` info 每秒）。
 - **实测**：170 项测试全过、clippy 清零；桌面 stderr 输出验证；**真机（无线 ADB 重连后）logcat 全链验证**：启动就绪 → 恢复 7MB 档案（含耗时 2070ms）→ 工具切换 → 填充（坐标/容差/瓦片数）→ FPS 4.3~27.3 实时读数 → onPause → 自动保存（档案时间戳确认）。Web console 后端与 logcat 同构，实例化期绑定 console 无法事后 hook 验证（方法限制，非缺陷）。
 - 布局约定：`[域] 消息`（tool/fill/shape/text/layer/history/io/transform/filter/preset/clipboard/doc/viewport/app/lifecycle/autosave/restore/fps）。
+
+---
+
+## 2026-09-30 折痕强化 + 定位小地图（设置项）
+
+### 折痕强化（样条之外的另一半根因：间距扇贝痕）
+- 默认 `spacing` 0.15 → **0.07**（dab 密度翻倍，圆头 dab 外缘的周期性扇贝痕减半）；默认 `smoothing` 0.35 → **0.5**
+- 形状线段（line_dabs）间距因子同步 0.15 → 0.07；6 支内置预设间距全部收紧（硬圆 0.06/软圆 0.05/马克 0.04/喷枪 0.2/书法 0.06/铅笔 0.12）
+- 测试确定性：spacing_splits_line 显式 spacing=0.15。浏览器实测：稀疏点 S 形曲线平滑连贯、无折线段、无扇贝痕、转弯圆滑
+
+### 定位小地图（相对定位视口，设置开关）
+- 引擎三 API：`viewport_center_on(x,y)`（旋转/翻转下正向变换逆解，画布点移到屏幕中心）、`viewport_rect()`（可见 AABB，四角包围盒）、`minimap_png(max_w,max_h)`（内容包围盒缩略 PNG + 元数据）
+- Android：`MinimapView`（右下角悬浮，170dp）——缩略内容 + **红色视口指示框** + 拖动/点按定位主视口；内容按 edit_count 节流刷新（≥1s）；设置对话框第三项"定位小地图"（SharedPreferences `cfg/minimap`，默认关）
+- 真机实测：设置勾选 → 小地图出现（缩略内容+红框）→ 点按后主视口水平位移 646px（定位生效）→ pref 持久化
+- **右上角固定**（2026-09-30 追加）：位置从右下改右上（状态栏下方），默认常显（设置项保留可关）；真机验证对角拖动 → 视口红框中心随动（1721,440 → 1761,510）、内容质心位移确认拖动定位方向正确
+
+---
+
+## 2026-09-30 图层单独显示（solo）+ wasm 时钟崩溃修复
+
+### 图层单独显示
+- 需求：点击某层只显示该层（而非叠加）。实现为**视图级 solo 状态**：`Document.solo: Option<LayerId>`（不入撤销/ORA），CPU（composite.rs）与 GPU（paint-gpu）合成循环同规则过滤——solo 层存在时只画该层，**指向已删层时安全回退全显**。引擎 API：`set_solo_layer/solo_layer/set_solo_index`（含日志）。
+- 交互：Android 图层对话框点行 = 选中 + solo 切换（同层再点恢复叠加），新增"显示全部"按钮，行内 "▶单独" 标记；Web 图层行点击同规则 + "全显"按钮。真机实测：点击行 → `[layer] 单独显示: Some(0)` 日志 → 底层内容暗采样 24414→587（隐藏生效）。单测：paint-render `solo_layer_shows_only_that_layer`（叠加/solo/悬空回退三态）+ e2e。Web 实测三态像素：叠加红蓝 / solo 顶层只蓝 / 恢复红蓝。
+
+### wasm 时钟崩溃（顺手抓出的重要 bug）
+- 现象：Web 上偶发"一切操作崩溃"（RefCell already mutably borrowed 连锁）。**首发 panic 经 status 落盘定位：`save_ora/load_ora` 日志计时的 `std::time::Instant` 在 wasm32 上 `time not implemented` panic**——30s 自动保存定时器到点即毒化实例（此前"非确定性"实为定时器时序）。与 fps 计数同理再次验证铁律：**paint-core 渲染/IO 路径不得依赖平台时钟**。修复：`timing_start/timing_ms` 辅助（wasm 返回 None，日志退化无耗时字段）。
+- 诊断基建：wasm panic hook（首发 panic 写入页面 #status + console.error，只记首次避免连锁噪声）——保留，后续排查利器。
+
+---
+
+## 2026-09-30 缩放掉帧优化（交互期低清渲染）
+
+**问题**：放大/缩小（捏合/滚轮）帧率降到 10-15。根因：缩放每帧全画布重合成，放大态走**双线性**（4 采样/像素）；平板 5.6MP 单线程软合成 60-90ms/帧。
+
+**方案（已实施）**：**交互期半分辨率渲染 + 松手精化**——手势/滚轮进行中，合成像素量 ÷4（视口临时缩放 0.5，旋转/翻转为线性变换可交换）；2× 最近邻上采样回全帧（源行展开 u64 双写 + 双目标行 memcpy，纯带宽 ~5ms）；交互结束（手势抬指/滚轮静止 160ms）自动全分辨率精化一帧。**按需启用**：仅重负载（zoom>1 双线性 或 可见层>2）且画布 ≥1MP——空场景低清无净收益（上采样固定成本），重场景收益明确。
+
+**接线**：Android 双指手势引擎自动判定（gesture 活动）+ 抬指精化；桌面滚轮 set_interactive + about_to_wait 160ms 超时精化；Web 滚轮同（main.js JS 超时）。
+
+**验证**：native e2e 基准（release，1880×3008+3 层+4x 双线性）**36.9 → 21.8ms/帧（1.7x，按需启用后 1.9x）**，空场景自动绕过（16.1→15.5 不劣化）；**真机双指手势期间 78.5fps**（此前 10-15）。175 项测试全过。
+**后续优化菜单**（未实施）：① 合成内循环 SIMD（NEON/aarch64）1.5-2x；② 平移增量帧搬运（仅 pan）；③ Android 接入 GPU 合成（paint-gpu+wgpu，架构级）；④ 上采样进一步压到 <3ms（ unsafe 指针）。**过程乌龙记录**：浏览器 IAB 标签页堆积导致后台定时器限流+渲染慢被误判为"wasm 挂死"，追凶二分多轮（v18-v26）实为测试环境问题——教训：IAB 多标签下 evaluate 长等待不可靠，验证须单标签+可见+分步短超时。

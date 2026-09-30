@@ -21,6 +21,9 @@ pub struct Document {
     /// 编辑计数：commit/undo/redo 自增。壳层自动保存的脏检查基准
     /// （记录上次保存时的计数，比较即可判断有无未保存修改）。
     edit_count: u64,
+    /// 单独显示的图层（视图状态，不入撤销/存档）：合成时只画该层。
+    /// 指向已不存在的图层时合成端安全回退为全部显示。
+    solo: Option<LayerId>,
 }
 
 impl Document {
@@ -38,6 +41,7 @@ impl Document {
             floating: None,
             canvas: None,
             edit_count: 0,
+            solo: None,
         }
     }
 
@@ -54,6 +58,7 @@ impl Document {
             floating: None,
             canvas: None,
             edit_count: 0,
+            solo: None,
         }
     }
 
@@ -61,6 +66,16 @@ impl Document {
     /// 壳层记录上次保存时的值，`edit_count() != saved_at` 即有未保存修改。
     pub fn edit_count(&self) -> u64 {
         self.edit_count
+    }
+
+    /// 单独显示的图层（None = 全部显示；视图状态）。
+    pub fn solo(&self) -> Option<LayerId> {
+        self.solo
+    }
+
+    /// 设置/清除单独显示。
+    pub fn set_solo(&mut self, id: Option<LayerId>) {
+        self.solo = id;
     }
 
     /// 固定画布尺寸（None = 无限画布）。

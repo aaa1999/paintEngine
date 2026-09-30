@@ -117,6 +117,24 @@ impl log::Log for ConsoleLogger {
     fn flush(&self) {}
 }
 
+fn init_panic_hook() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FIRST: AtomicBool = AtomicBool::new(false);
+    std::panic::set_hook(Box::new(|info| {
+        if FIRST.swap(true, Ordering::SeqCst) {
+            return; // 只记首发（RefCell 毒化后的都是连锁）
+        }
+        let msg = format!("panic: {info}");
+        crate::error(&msg);
+        // 写入页面状态便于无控制台环境诊断
+        if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+            if let Some(st) = doc.get_element_by_id("status") {
+                st.set_text_content(Some(&msg[..msg.len().min(300)]));
+            }
+        }
+    }));
+}
+
 fn init_console_logger() {
     let level = web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -187,6 +205,7 @@ pub struct PaintApp {
 impl PaintApp {
     #[wasm_bindgen(constructor)]
     pub fn new(canvas: HtmlCanvasElement) -> Result<PaintApp, JsValue> {
+        init_panic_hook();
         init_console_logger();
         let ctx: CanvasRenderingContext2d = canvas
             .get_context("2d")?
@@ -311,6 +330,23 @@ impl PaintApp {
     /// 编辑计数（自动保存脏检查）。
     pub fn edit_count(&self) -> u64 {
         self.inner.borrow().engine.edit_count()
+    }
+
+    /// 交互期渲染开关（滚轮缩放连发时壳层开启；160ms 静止后关）。
+    pub fn set_interactive(&self, on: bool) {
+        self.mark_render(|e| {
+            e.set_interactive(on);
+            true
+        });
+    }
+
+    /// 单独显示某层（index = 栈序；-1 = 恢复全部显示）。
+    pub fn set_solo_index(&self, index: i32) {
+        let idx = if index < 0 { None } else { Some(index as usize) };
+        self.mark_render(|e| {
+            e.set_solo_index(idx);
+            true
+        });
     }
 
     /// 呈现帧计数（单调；监控关闭时冻结）。壳层采样差值算帧率。
@@ -914,6 +950,7 @@ impl PaintApp {
                 let factor = if e.delta_y() < 0.0 { 1.1 } else { 1.0 / 1.1 };
                 let mut i = inner_wheel.borrow_mut();
                 i.engine.document_mut().viewport_mut().zoom_at(pos, factor);
+                i.engine.set_interactive(true);
                 i.needs_render.set(true);
             });
             target.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())?;

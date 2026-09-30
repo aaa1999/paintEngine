@@ -185,6 +185,8 @@ struct App {
     last_fps_print: Option<std::time::Instant>,
     /// 帧率采样基线（时刻, 呈现计数）。
     last_fps_sample: Option<(std::time::Instant, u64)>,
+    /// 最近一次滚轮缩放时刻（160ms 静止后关交互期渲染并精化）。
+    last_interactive_at: Option<std::time::Instant>,
     /// 按需重绘：任何输入/焦点/尺寸事件置位，画完即清。
     needs_redraw: bool,
     layer_panel: panel::Panel,
@@ -224,6 +226,7 @@ impl App {
             text_size_hint: None,
             last_fps_print: None,
             last_fps_sample: None,
+            last_interactive_at: None,
             layer_panel: panel::Panel::new(),
             needs_redraw: true,
             docs: Vec::new(),
@@ -974,6 +977,8 @@ impl ApplicationHandler for App {
                         .document_mut()
                         .viewport_mut()
                         .zoom_at(self.cursor, factor);
+                    self.engine.set_interactive(true);
+                    self.last_interactive_at = Some(std::time::Instant::now());
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1355,6 +1360,14 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // 滚轮缩放静止 160ms → 关交互期渲染（下一帧全分辨率精化）
+        if let Some(t) = self.last_interactive_at {
+            if t.elapsed().as_millis() >= 160 {
+                self.last_interactive_at = None;
+                self.engine.set_interactive(false);
+                self.needs_redraw = true;
+            }
+        }
         // 检查点式自动保存（每 30 次编辑）
         if self.engine.edit_count().saturating_sub(self.saved_edit_count) >= 30 {
             self.autosave_checkpoint();

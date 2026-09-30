@@ -81,6 +81,11 @@ class PaintEngineView @JvmOverloads constructor(
     private external fun nativeEditCount(handle: Long): Long
     private external fun nativeRenderCount(handle: Long): Long
     private external fun nativeSetFpsMonitor(handle: Long, on: Boolean)
+    private external fun nativeSetSoloIndex(handle: Long, index: Int)
+    private external fun nativeViewportCenterOn(handle: Long, x: Double, y: Double)
+    private external fun nativeViewportRect(handle: Long): FloatArray?
+    private external fun nativeMinimapPng(handle: Long, maxW: Int, maxH: Int): Array<Any>?
+    private external fun nativeSetLogLevel(level: Int)
     private external fun nativeSaveOra(handle: Long): ByteArray?
     private external fun nativeLoadOra(handle: Long, data: ByteArray): Boolean
     private external fun nativeSetBrushSize(handle: Long, size: Double)
@@ -325,6 +330,29 @@ class PaintEngineView @JvmOverloads constructor(
     fun renderCount(): Long = if (handle == 0L) 0 else nativeRenderCount(handle)
 
     /** 帧率监控开关。 */
+    /** 单独显示某层（index = 栈序；-1 = 全部显示）。 */
+    fun setSoloIndex(index: Int) {
+        if (handle != 0L) nativeSetSoloIndex(handle, index)
+    }
+
+    /** 视口定位：画布坐标移到屏幕中心（小地图拖动）。 */
+    fun viewportCenterOn(x: Double, y: Double) {
+        if (handle != 0L) nativeViewportCenterOn(handle, x, y)
+    }
+
+    /** 可见画布区域 AABB：(x, y, w, h)。 */
+    fun viewportRect(): FloatArray? =
+        if (handle == 0L) null else nativeViewportRect(handle)
+
+    /** 小地图：[0]=ByteArray(png) [1]=FloatArray(ow,oh,bx,by,bw,bh,0)。 */
+    fun minimapPng(maxW: Int, maxH: Int): Array<Any>? =
+        if (handle == 0L) null else nativeMinimapPng(handle, maxW, maxH)
+
+    /** 日志级别（0=Off 1=Error 2=Warn 3=Info 4=Debug 5=Trace；adb 调试）。 */
+    fun setLogLevel(level: Int) {
+        nativeSetLogLevel(level)
+    }
+
     fun setFpsMonitor(on: Boolean) {
         if (handle != 0L) nativeSetFpsMonitor(handle, on)
     }

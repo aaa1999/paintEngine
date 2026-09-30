@@ -93,10 +93,15 @@ pub fn composite(
         None => clip,
     };
     let all_layers: Vec<&paint_core::layer::Layer> = doc.layers().iter().collect();
+    // 单独显示：solo 层存在时只画该层（层已删则安全回退全显）
+    let solo = doc
+        .solo()
+        .filter(|s| doc.layers().iter_with_id().any(|(id, _)| id == *s));
     for (li, layer) in all_layers
         .iter()
         .enumerate()
         .filter(|(_, l)| l.visible && l.opacity > 0.0)
+        .filter(|(li, _)| solo.is_none() || doc.layers().iter_with_id().nth(*li).map(|(id, _)| Some(id) == solo).unwrap_or(false))
     {
         let opacity = layer.opacity.clamp(0.0, 1.0);
         let mode = layer.blend_mode;
@@ -933,6 +938,71 @@ mod tests {
         assert_eq!(px(&frame, w, 32, 32), [255, 255, 255, 255]);
         assert_eq!(px(&frame, w, 36, 32)[0], 0, "半径 3..6 环带仍是底黑");
     }
+    /// 单独显示：solo 时只画该层；清除恢复叠加；悬空 solo 安全回退全显。
+    #[test]
+    fn solo_layer_shows_only_that_layer() {
+        let frame_with = |solo: Option<paint_core::LayerId>| -> Vec<u8> {
+            let mut doc = Document::new(usize::MAX);
+            doc.set_background(Color::WHITE);
+            // 底层：红块
+            let red = doc.layers().try_active().expect("活动层");
+            let mk = |layers: &mut paint_core::LayerStack, id: paint_core::LayerId, c: Color| {
+                let dabs = vec![Dab {
+                    x: 32.0, y: 32.0, radius: 6.0, hardness: 1.0,
+                    color: c, alpha: 1.0, mode: DabMode::Buildup, erase: false,
+                    tip: None, scatter: 0.0, aspect: 1.0, angle: 0.0, dual: None,
+                }];
+                let layer = layers.get_mut(id);
+                super::super::stamp::stamp_dabs(
+                    &mut layer.tiles, &dabs, None,
+                    &mut StrokeRecorder::new(id),
+                );
+            };
+            mk(doc.layers_mut(), red, Color { r: 255, g: 0, b: 0 });
+            // 顶层：蓝块
+            let blue = doc.layers_mut().insert(None);
+            mk(doc.layers_mut(), blue, Color { r: 0, g: 0, b: 255 });
+            doc.set_solo(solo);
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            composite(&doc, &mut buf, 64, Rect::new(0, 0, 64, 64), Some(Color::WHITE));
+            buf
+        };
+        let i = (32 * 64 + 32) * 4;
+        // 无 solo：蓝在上 → 蓝
+        let both = frame_with(None);
+        assert_eq!((both[i], both[i + 2]), (0, 255), "叠加时顶层蓝");
+        // 需要拿到层 id…… insert 返回 id 但闭包里不可外带——改为两次构建比较：
+        // 用固定判断：solo = 底层（红）
+        let solo_bottom = {
+            let mut doc = Document::new(usize::MAX);
+            doc.set_background(Color::WHITE);
+            let red = doc.layers().try_active().expect("活动层");
+            let blue = doc.layers_mut().insert(None);
+            let mk = |layers: &mut paint_core::LayerStack, id: paint_core::LayerId, c: Color| {
+                let dabs = vec![Dab {
+                    x: 32.0, y: 32.0, radius: 6.0, hardness: 1.0,
+                    color: c, alpha: 1.0, mode: DabMode::Buildup, erase: false,
+                    tip: None, scatter: 0.0, aspect: 1.0, angle: 0.0, dual: None,
+                }];
+                let layer = layers.get_mut(id);
+                super::super::stamp::stamp_dabs(
+                    &mut layer.tiles, &dabs, None,
+                    &mut StrokeRecorder::new(id),
+                );
+            };
+            mk(doc.layers_mut(), red, Color { r: 255, g: 0, b: 0 });
+            mk(doc.layers_mut(), blue, Color { r: 0, g: 0, b: 255 });
+            doc.set_solo(Some(red));
+            let mut buf = vec![0u8; 64 * 64 * 4];
+            composite(&doc, &mut buf, 64, Rect::new(0, 0, 64, 64), Some(Color::WHITE));
+            (red, blue, buf)
+        };
+        let (_, _, buf) = solo_bottom;
+        assert_eq!((buf[i], buf[i + 2]), (255, 0), "solo 底层时只显红");
+        // 悬空 solo：回退全显（蓝）
+        let dangling = frame_with(Some(paint_core::LayerId::from_raw(99999)));
+        assert_eq!((dangling[i], dangling[i + 2]), (0, 255), "悬空 solo 回退全显");
+    }
 }
 
 #[cfg(test)]
@@ -1117,4 +1187,5 @@ mod adjustment_tests {
         let f = frame(&doc, 64);
         assert_eq!(f[(32 * 64 + 32) * 4], 0, "strength=0 时无效果");
     }
+
 }

@@ -12,7 +12,6 @@ import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewTreeObserver
 import android.widget.Button
 import android.widget.EditText
 import android.widget.HorizontalScrollView
@@ -21,8 +20,9 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import java.io.OutputStream
-import java.nio.ByteBuffer
+import android.view.ViewTreeObserver
 import kotlin.concurrent.thread
+import java.nio.ByteBuffer
 
 /**
  * paintEngine Android 演示 Activity。
@@ -56,13 +56,16 @@ class MainActivity : Activity() {
     // 帧率悬浮标签（设置项控制显隐）
     private lateinit var fpsLabel: Button
 
+    // 定位小地图（设置项控制显隐）
+    private lateinit var minimapView: MinimapView
+
     // 文字字号（对话框滑杆）
     private var textSize = 48f
 
     // 系统字体缓存（文字工具用）。后台预读线程与 UI 兜底路径都会触碰 → volatile
     @Volatile private var fontBytes: ByteArray? = null
 
-    /** 字体已喂给引擎（setTextFont 每次调用都重新解析字体，须只喂一次）。 */
+    /** 字体已喂给引擎（setTextFont 每次都重新解析字体，须只喂一次）。 */
     private var fontOnEngine = false
 
     /** 后台预读的自动存档字节；首帧后就位。 */
@@ -110,11 +113,20 @@ class MainActivity : Activity() {
             lp.topMargin = dp(36) // 避开状态栏（NoActionBar 下 stage 从屏幕顶起算）
             layoutParams = lp
         }
+        minimapView = MinimapView(this, paintView)
+        minimapView.visibility =
+            if (getSharedPreferences("cfg", MODE_PRIVATE).getBoolean("minimap", true))
+                View.VISIBLE else View.GONE
         applyFpsMonitor(getSharedPreferences("cfg", MODE_PRIVATE)
             .getBoolean("fps_monitor", true)) // 设置项默认开
         // 悬浮标签点击 = 快捷开关（正式入口在"设置"）
         fpsLabel.setOnClickListener { applyFpsMonitor(fpsLabel.visibility != View.VISIBLE) }
         stage.addView(fpsLabel)
+        stage.addView(minimapView, android.widget.FrameLayout.LayoutParams(
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+            android.view.Gravity.TOP or android.view.Gravity.END,
+        ))
         // 500ms 采样：帧率 = 呈现计数差值 / 采样间隔（引擎无平台时钟）
         var lastCount = 0L
         var lastTime = android.os.SystemClock.elapsedRealtime()
@@ -170,10 +182,9 @@ class MainActivity : Activity() {
         paintView.onTextAnchor = { cx, cy -> showTextInput(cx, cy) }
         paintView.onTextEdit = { t, sz, _ -> showTextInput(0.0, 0.0, existing = t, existingSize = sz) }
 
-        // 启动关键路径优化：重 I/O（CJK 字体读取 / 自动存档读取）全部移到
-        // 后台线程预读，首帧就绪后才回到 UI 线程落位（存档解码 → 字体喂引擎）。
-        // 此前 ensureFont + maybeRestoreAutosave 同步跑在 onCreate 里，
-        // 实测把首帧拖到 2.3s+（白屏主体）。
+        // 启动关键路径优化（自 android-delivery 合并）：重 I/O（CJK 字体读取 /
+        // 自动存档读取）移到后台线程预读，首帧就绪后才回 UI 线程落位。
+        // 同步跑在 onCreate 里实测把首帧拖到 2.3s+（白屏主体）。
         warmStartupDataAsync()
         paintView.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
             override fun onPreDraw(): Boolean {
@@ -183,8 +194,8 @@ class MainActivity : Activity() {
                     "[startup] 首帧就绪 ${android.os.SystemClock.elapsedRealtime() - bootT0}ms（自 Activity 构造）",
                 )
                 reportFullyDrawn()
-                // 重落位（存档解码 ~2s）绝不能在 onPreDraw 里做——会把首帧
-                // 堵住。postDelayed：先让这一帧上屏、idle 信号回报，再开始解码。
+                // 重落位（存档解码 ~2s）绝不能在 onPreDraw 里做——会把首帧堵住。
+                // postDelayed：先让这一帧上屏、idle 信号回报，再开始解码。
                 paintView.postDelayed({ applyStartupData() }, RESTORE_DELAY_MS)
                 return true
             }
@@ -277,9 +288,8 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 文字字体（对象光栅化）：读系统字体一次并设置。
-     *  setTextFont 每次调用都让引擎重新解析字体，故用 fontOnEngine 保证只喂一次；
-     *  常规路径由启动预读 + 首帧后落位完成，这里只是文字工具被提前使用时的同步兜底。 */
+
+    /** 文字字体（对象光栅化）：读系统字体一次并设置（只喂引擎一次）。 */
     private fun ensureFont() {
         if (fontBytes == null) fontBytes = loadFont()
         val b = fontBytes
@@ -681,25 +691,39 @@ class MainActivity : Activity() {
         val indices = (0 until count).reversed().toList()
         val active = paintView.activeLayerIndex()
         val checkedPos = indices.indexOf(active).coerceAtLeast(0)
-        val labels = indices.mapIndexed { pos, idx ->
+        // 单独显示状态（视图级，不持久；对话框会话内维护）
+        var soloIdx = -1
+        fun labels(): Array<String> = indices.mapIndexed { pos, idx ->
             val mark = if (idx == active) "● " else "○ "
+            val solo = if (idx == soloIdx) "▶单独 " else ""
             val name = paintView.layerNameAt(idx) ?: ("图层 ${idx + 1}")
-            mark + name
+            mark + solo + name
         }.toTypedArray()
 
-        android.app.AlertDialog.Builder(this)
-            .setTitle("图层（共 $count 层）")
-            .setSingleChoiceItems(labels, checkedPos) { dlg, which ->
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("图层（共 $count 层）· 点击单独显示，再点恢复叠加")
+            .setSingleChoiceItems(labels(), checkedPos) { dlg, which ->
                 val idx = indices[which]
                 paintView.selectLayerIndex(idx)
+                // 同层再点 = 取消单独；异层 = 单独该层
+                soloIdx = if (soloIdx == idx) -1 else idx
+                paintView.setSoloIndex(soloIdx)
                 paintView.invalidate()
-                dlg.dismiss()
-                Toast.makeText(this, "当前层：${paintView.layerNameAt(idx) ?: (idx + 1)}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this,
+                    if (soloIdx >= 0) "单独显示：${paintView.layerNameAt(idx) ?: (idx + 1)}" else "显示全部图层",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             .setPositiveButton("新建") { _, _ ->
                 paintView.addLayer()
                 paintView.invalidate()
                 Toast.makeText(this, "已新建图层（共 ${paintView.layerCount()} 层），之后画在新层上", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("显示全部") { _, _ ->
+                soloIdx = -1
+                paintView.setSoloIndex(-1)
+                paintView.invalidate()
             }
             .setNeutralButton("向下合并") { _, _ ->
                 if (paintView.mergeDown()) {
@@ -723,10 +747,11 @@ class MainActivity : Activity() {
     /** 设置项：帧率监控 / 网格点阵（SharedPreferences 持久化）。 */
     private fun showSettingsDialog() {
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        val items = arrayOf("帧率监控", "网格点阵")
+        val items = arrayOf("帧率监控", "网格点阵", "定位小地图")
         val checked = booleanArrayOf(
             prefs.getBoolean("fps_monitor", true),
             prefs.getBoolean("show_grid", true),
+            prefs.getBoolean("minimap", false),
         )
         android.app.AlertDialog.Builder(this)
             .setTitle("设置")
@@ -738,10 +763,120 @@ class MainActivity : Activity() {
                         paintView.setShowGrid(isChecked)
                         paintView.invalidate()
                     }
+                    2 -> {
+                        prefs.edit().putBoolean("minimap", isChecked).apply()
+                        minimapView.visibility = if (isChecked) View.VISIBLE else View.GONE
+                        if (isChecked) minimapView.requestContent()
+                    }
                 }
             }
             .setPositiveButton("完成", null)
             .show()
+    }
+
+    /**
+     * 定位小地图：右下角缩略视口。内容 = 文档包围盒缩略图（编辑后自动刷新）；
+     * 红框 = 当前主视口范围；拖动/点按 = 把对应画布位置移到主视口中心。
+     */
+    private class MinimapView(
+        ctx: android.content.Context,
+        private val paintView: PaintEngineView,
+    ) : android.view.View(ctx) {
+
+        private var bmp: android.graphics.Bitmap? = null
+        private var meta: FloatArray? = null  // ow, oh, bx, by, bw, bh
+        private var lastEdit = -1L
+        private var lastRefresh = 0L
+
+        private val mmPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        private val boxPaint = android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(230, 60, 60)
+            style = android.graphics.Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        private val bgPaint = android.graphics.Paint().apply {
+            color = 0xEE2A2A2E.toInt()
+        }
+
+        init {
+            val dp = ctx.resources.displayMetrics.density
+            val lp = android.widget.FrameLayout.LayoutParams(
+                (170 * dp).toInt(), (170 * dp).toInt())
+            lp.topMargin = (36 * dp).toInt() // 状态栏下方
+            lp.rightMargin = (8 * dp).toInt()
+            layoutParams = lp
+            setPadding((6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt(), (6 * dp).toInt())
+        }
+
+        /** 内容刷新（编辑计数变化时自动节流 ≥1s；强制刷新入口）。 */
+        fun requestContent() {
+            refreshIfDue(force = true)
+        }
+
+        private fun refreshIfDue(force: Boolean) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            val ec = paintView.editCount()
+            if (!force && (ec == lastEdit || now - lastRefresh < 1000)) return
+            val r = paintView.minimapPng(width.takeIf { it > 0 } ?: 400,
+                height.takeIf { it > 0 } ?: 400) ?: return
+            val png = r[0] as? ByteArray ?: return
+            val m = r[1] as? FloatArray ?: return
+            runCatching {
+                bmp?.recycle()
+                bmp = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
+                meta = m
+                lastEdit = ec
+                lastRefresh = now
+                invalidate()
+            }
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            canvas.drawRoundRect(0f, 0f, w, h, 10f, 10f, bgPaint)
+            val b = bmp ?: run { refreshIfDue(false); return }
+            val m = meta ?: return
+            // 缩略图按比例居中放入
+            val scale = minOf((w - 12f) / m[0], (h - 12f) / m[1], 8f)
+            val dw = m[0] * scale; val dh = m[1] * scale
+            val dx = (w - dw) / 2f; val dy = (h - dh) / 2f
+            mmPaint.alpha = 255
+            canvas.drawBitmap(b, null, android.graphics.RectF(dx, dy, dx + dw, dy + dh), mmPaint)
+            // 主视口指示框（画布 AABB → 缩略图坐标）
+            val vr = paintView.viewportRect() ?: return
+            val fx = { cx: Float -> dx + (cx - m[2]) / m[4] * dw }
+            val fy = { cy: Float -> dy + (cy - m[3]) / m[5] * dh }
+            canvas.drawRect(
+                fx(vr[0]), fy(vr[1]),
+                fx(vr[0] + vr[2]), fy(vr[1] + vr[3]),
+                boxPaint,
+            )
+            // 节流刷新内容（编辑后）
+            refreshIfDue(false)
+        }
+
+        override fun onTouchEvent(e: android.view.MotionEvent): Boolean {
+            android.util.Log.i("paintEngine", "[minimap] touch ${bmp != null}")
+            val b = bmp ?: return false
+            val m = meta ?: return false
+            val scale = minOf((width - 12f) / m[0], (height - 12f) / m[1], 8f)
+            val dw = m[0] * scale; val dh = m[1] * scale
+            val dx = (width - dw) / 2f; val dy = (height - dh) / 2f
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN,
+                android.view.MotionEvent.ACTION_MOVE,
+                -> {
+                    // 缩略图坐标 → 画布坐标 → 主视口居中
+                    val cx = (m[2] + (e.x - dx).coerceIn(0f, dw) / dw * m[4]).toDouble()
+                    val cy = (m[3] + (e.y - dy).coerceIn(0f, dh) / dh * m[5]).toDouble()
+                    paintView.viewportCenterOn(cx, cy)
+                    paintView.invalidate()
+                    invalidate()
+                    return true
+                }
+            }
+            return super.onTouchEvent(e)
+        }
     }
 
     private fun savePng() {

@@ -33,6 +33,9 @@ web-sys = { version = "0.3", features = [
     "Performance",
 ] }
 
+[dev-dependencies]
+wasm-bindgen-test = "0.2"
+
 [features]
 default = ["svg", "text"]
 core = []

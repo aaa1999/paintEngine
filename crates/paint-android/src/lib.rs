@@ -754,6 +754,15 @@ fn native_methods() -> Vec<NativeMethod> {
     }
     vec![
         entry("nativeCreate", "()J", native_create as *mut c_void),
+        entry("nativeSetSoloIndex", "(JI)V", native_set_solo_index as *mut c_void),
+        entry("nativeViewportCenterOn", "(JDD)V", native_viewport_center_on as *mut c_void),
+        entry("nativeViewportRect", "(J)[F", native_viewport_rect as *mut c_void),
+        entry(
+            "nativeMinimapPng",
+            "(JII)[Ljava/lang/Object;",
+            native_minimap_png as *mut c_void,
+        ),
+        entry("nativeSetLogLevel", "(I)V", native_set_log_level as *mut c_void),
         entry("nativeDestroy", "(J)V", native_destroy as *mut c_void),
         entry("nativeResize", "(JIIF)V", native_resize as *mut c_void),
         entry(
@@ -930,6 +939,78 @@ fn native_methods() -> Vec<NativeMethod> {
 ///
 /// 返回 `JNI_VERSION_1_6` 表示就绪；注册失败返回 `JNI_ERR`，宿主将
 /// 收到 `UnsatisfiedLinkError`（类名/签名与 Kotlin 声明不匹配时）。
+/// 单独显示某层（index = 栈序；-1 = 恢复全部显示）。
+extern "system" fn native_set_solo_index(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    index: jint,
+) {
+    let idx = if index < 0 { None } else { Some(index as usize) };
+    engine(handle).set_solo_index(idx);
+}
+
+/// 视口定位：把画布坐标移到屏幕中心（小地图拖动）。
+extern "system" fn native_viewport_center_on(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    x: jdouble,
+    y: jdouble,
+) {
+    engine(handle).viewport_center_on(x, y);
+}
+
+/// 可见画布区域 AABB：(x, y, w, h)。
+extern "system" fn native_viewport_rect(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jfloatArray {
+    let (x, y, w, h) = engine(handle).viewport_rect();
+    let vals = [x as f32, y as f32, w as f32, h as f32];
+    match env.new_float_array(4) {
+        Ok(mut a) => {
+            if env.set_float_array_region(&mut a, 0, &vals).is_ok() {
+                a.as_raw()
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// 小地图：返回 Object[2] = {byte[] png, float[7] meta(ow,oh,bx,by,bw,bh,占位)}。
+extern "system" fn native_minimap_png(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    max_w: jint,
+    max_h: jint,
+) -> jni::sys::jobjectArray {
+    let Some((png, ow, oh, bx, by, bw, bh)) =
+        engine(handle).minimap_png(max_w.max(1) as u32, max_h.max(1) as u32)
+    else {
+        return std::ptr::null_mut();
+    };
+    let arr = match env.new_object_array(2, "java/lang/Object", JObject::null()) {
+        Ok(a) => a,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let Ok(bytes) = env.byte_array_from_slice(&png) else {
+        return std::ptr::null_mut();
+    };
+    let _ = env.set_object_array_element(&arr, 0, bytes);
+    let meta = [ow as f32, oh as f32, bx as f32, by as f32, bw as f32, bh as f32, 0.0];
+    if let Ok(mut m) = env.new_float_array(7) {
+        if env.set_float_array_region(&mut m, 0, &meta).is_ok() {
+            let _ = env.set_object_array_element(&arr, 1, m);
+        }
+    }
+    arr.as_raw()
+}
+
 #[no_mangle]
 pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
     init_logcat_logger();
@@ -938,7 +1019,10 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) 
     };
     match env.register_native_methods(JNI_CLASS, &native_methods()) {
         Ok(()) => {
-            log::info!("[app] RegisterNatives 完成：{} 个方法 → {JNI_CLASS}", 46);
+            log::info!(
+                "[app] RegisterNatives 完成：{} 个方法 → {JNI_CLASS}",
+                native_methods().len()
+            );
             jni::sys::JNI_VERSION_1_6
         }
         Err(e) => {
@@ -1097,7 +1181,7 @@ mod tests {
         let methods = native_methods();
         assert_eq!(
             methods.len(),
-            46,
+            51,
             "与 PaintEngineView.kt 的 external fun 数量一致"
         );
         let mut names: Vec<String> = methods

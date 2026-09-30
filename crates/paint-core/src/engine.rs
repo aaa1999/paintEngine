@@ -231,6 +231,12 @@ pub struct Engine {
     text_font: Option<std::sync::Arc<Vec<u8>>>,
     /// 帧率监控开关（EngineConfig.fps_monitor，默认开）。
     fps_monitor: bool,
+    /// 交互期渲染（缩放/平移手势中）：半分辨率合成 + 最近邻上采样。
+    interactive: bool,
+    /// 低清合成暂存（interactive 时复用）。
+    scratch: Vec<u8>,
+    /// 上采样行展开缓冲（2× 特化复用）。
+    row2: Vec<u8>,
     /// 呈现帧计数（render 计数；监控关闭时冻结）。
     /// 壳层用自己的时钟两次采样差值即得帧率——引擎不依赖平台时钟
     ///（std Instant 在 wasm32 上不可用）。
@@ -285,6 +291,9 @@ impl Engine {
             obj_drag_before: None,
             text_font: None,
             fps_monitor: config.fps_monitor,
+            interactive: false,
+            scratch: Vec::new(),
+            row2: Vec::new(),
             presents: 0,
             pen_in_range: false,
             vp_rev: 0,
@@ -621,6 +630,20 @@ impl Engine {
         self.fps_monitor
     }
 
+    /// 交互期渲染是否激活（含手势自动判定）。
+    pub fn interactive_enabled(&self) -> bool {
+        self.interactive || self.gesture.is_some()
+    }
+
+    /// 交互期渲染开关（滚轮缩放等壳层驱动场景）。开启：半分辨率合成；
+    /// 关闭：置全脏区做一次全分辨率精化。双指手势无需壳层调用（自动）。
+    pub fn set_interactive(&mut self, on: bool) {
+        if self.interactive && !on {
+            self.dirty = Dirty::All; // 精化一帧
+        }
+        self.interactive = on;
+    }
+
     /// 合成帧缓冲的可变访问（呈现前叠加 UI 用）。
     pub fn frame_mut(&mut self) -> Option<&mut [u8]> {
         if self.frame.is_empty() {
@@ -708,6 +731,33 @@ impl Engine {
     // ── 图层结构 API（撤销走 Document 历史）──
 
     /// 新建图层（入撤销）。
+    /// 单独显示某层（视图状态，不入撤销/存档）：合成只画该层。
+    /// `None` = 恢复全部显示。指向已删层时合成端安全回退全显。
+    pub fn set_solo_layer(&mut self, id: Option<LayerId>) {
+        if self.doc.solo() != id {
+            log::info!("[layer] 单独显示: {:?}", id.map(|i| i.to_raw()));
+            self.doc.set_solo(id);
+            self.dirty = Dirty::All;
+        }
+    }
+
+    /// 当前单独显示的图层。
+    pub fn solo_layer(&self) -> Option<LayerId> {
+        self.doc.solo()
+    }
+
+    /// 按栈序索引设置单独显示（壳层列表交互便利）。
+    pub fn set_solo_index(&mut self, idx: Option<usize>) {
+        let id = idx.and_then(|i| {
+            self.doc
+                .layers()
+                .iter_with_id()
+                .nth(i)
+                .map(|(id, _)| id)
+        });
+        self.set_solo_layer(id);
+    }
+
     pub fn add_layer(&mut self) -> Option<LayerId> {
         log::info!("[layer] 新建图层");
         let r = self.doc.add_layer(None);
@@ -2028,19 +2078,25 @@ impl Engine {
 
     /// 保存为 .ora（含合成图与缩略图）。
     pub fn save_ora(&mut self) -> Option<Vec<u8>> {
-        let t0 = std::time::Instant::now();
+        let t0 = timing_start();
         let merged = self.export_png(None, 1.0, true)?;
         let b = self.visible_content_bounds()?;
         let scale = (256.0 / b.w as f64).min(256.0 / b.h as f64).min(1.0) as f32;
         let thumb = self.export_png(Some(b), scale, true)?;
         match crate::ora::encode_ora(&self.doc, Some(&merged), Some(&thumb)) {
             Ok(bytes) => {
-                log::info!(
-                    "[io] 存档 ORA {} 字节（{:.1}ms，edit_count={}）",
-                    bytes.len(),
-                    t0.elapsed().as_secs_f64() * 1000.0,
-                    self.doc.edit_count()
-                );
+                match timing_ms(t0) {
+                    Some(ms) => log::info!(
+                        "[io] 存档 ORA {} 字节（{ms:.1}ms，edit_count={}）",
+                        bytes.len(),
+                        self.doc.edit_count()
+                    ),
+                    None => log::info!(
+                        "[io] 存档 ORA {} 字节（edit_count={}）",
+                        bytes.len(),
+                        self.doc.edit_count()
+                    ),
+                }
                 Some(bytes)
             }
             Err(e) => {
@@ -2052,7 +2108,7 @@ impl Engine {
 
     /// 载入 .ora 替换当前文档（历史重置）。
     pub fn load_ora(&mut self, bytes: &[u8]) -> bool {
-        let t0 = std::time::Instant::now();
+        let t0 = timing_start();
         let Ok(ora) = crate::ora::decode_ora(bytes) else {
             log::warn!("[io] 载入 ORA 失败（{} 字节，解码错误）", bytes.len());
             return false;
@@ -2069,12 +2125,14 @@ impl Engine {
             stack.set_active(*top);
         }
         self.doc = Document::with_layers(stack);
-        log::info!(
-            "[io] 载入 ORA {} 字节 → {} 层（{:.1}ms）",
-            bytes.len(),
-            ids.len(),
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
+        match timing_ms(t0) {
+            Some(ms) => log::info!(
+                "[io] 载入 ORA {} 字节 → {} 层（{ms:.1}ms）",
+                bytes.len(),
+                ids.len()
+            ),
+            None => log::info!("[io] 载入 ORA {} 字节 → {} 层", bytes.len(), ids.len()),
+        }
         self.dirty = Dirty::All;
         true
     }
@@ -2164,44 +2222,8 @@ impl Engine {
         }
     }
 
-    /// 合成并呈现。Clean 时跳过合成仅重新呈现（窗口恢复等场景）。
-    pub fn render(&mut self, surface: &mut dyn Surface) {
-        // 撤销/重做/载入后的对象缓存重建（置位 stale 的层）
-        self.refresh_stale_objects();
-        let (w, h) = self.size;
-        if w == 0 || h == 0 {
-            return;
-        }
-        if self.fps_monitor {
-            self.presents += 1;
-        }
-        // 视口被外部（壳层手势等）修改：全量重绘
-        let vp_rev = self.doc.viewport().revision();
-        if vp_rev != self.vp_rev {
-            self.vp_rev = vp_rev;
-            self.dirty = Dirty::All;
-        }
-        if self.dirty == Dirty::Clean {
-            surface.present_cpu(&self.frame, self.size, None);
-            return;
-        }
-        let full = Rect::new(0, 0, w, h);
-        let region = match self.dirty {
-            Dirty::All => full,
-            Dirty::Part(r) => match r.intersect(&full) {
-                Some(r) => r,
-                None => {
-                    self.dirty = Dirty::Clean;
-                    surface.present_cpu(&self.frame, self.size, None);
-                    return;
-                }
-            },
-            // Clean 分支上方已提前返回；防御性兜底（不 panic）
-            Dirty::Clean => full,
-        };
-        let bg = self.doc.background();
-        self.renderer
-            .composite(&self.doc, &mut self.frame, w, region, Some(bg));
+    /// 形状拖拽预览：合成后叠加到帧（不落瓦片、不入撤销；全清/低清两路共用）。
+    fn stamp_shape_preview(&mut self, w: u32, region: crate::geometry::Rect) {
         // 形状拖拽预览：合成后叠加到帧（不落瓦片、不入撤销）
         if let Some(sh) = self.shape_drag {
             let vp = self.doc.viewport().clone();
@@ -2267,6 +2289,120 @@ impl Engine {
                 crate::preview::stamp_dabs_flat(&mut self.frame, w, region, &screen_dabs);
             }
         }
+    }
+
+    /// 合成并呈现。Clean 时跳过合成仅重新呈现（窗口恢复等场景）。
+    pub fn render(&mut self, surface: &mut dyn Surface) {
+        // 撤销/重做/载入后的对象缓存重建（置位 stale 的层）
+        self.refresh_stale_objects();
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        if self.fps_monitor {
+            self.presents += 1;
+        }
+        // 视口被外部（壳层手势等）修改：全量重绘
+        let vp_rev = self.doc.viewport().revision();
+        if vp_rev != self.vp_rev {
+            self.vp_rev = vp_rev;
+            self.dirty = Dirty::All;
+        }
+        if self.dirty == Dirty::Clean {
+            surface.present_cpu(&self.frame, self.size, None);
+            return;
+        }
+        let full = Rect::new(0, 0, w, h);
+        let region = match self.dirty {
+            Dirty::All => full,
+            Dirty::Part(r) => match r.intersect(&full) {
+                Some(r) => r,
+                None => {
+                    self.dirty = Dirty::Clean;
+                    surface.present_cpu(&self.frame, self.size, None);
+                    return;
+                }
+            },
+            // Clean 分支上方已提前返回；防御性兜底（不 panic）
+            Dirty::Clean => full,
+        };
+        // ── 交互期低清路径：半分辨率合成 + 最近邻上采样（像素量 ÷4）──
+        // 双指手势进行中或壳层显式声明（滚轮缩放连发）时启用；
+        // 小画布（<1MP）不值得降质，直接走全分辨率。
+        // 按需启用：交互中 + 大画布 + 重负载（放大双线性或多图层）——
+        // 空场景低清无净收益（上采样固定成本），重场景 1.7x+（见 e2e 基准）
+        let heavy = self.doc.viewport().zoom() > 1.0
+            || self.doc.layers().iter().filter(|l| l.visible).count() > 2;
+        let interactive = (self.gesture.is_some() || self.interactive)
+            && heavy
+            && (w as u64) * (h as u64) >= 1_000_000;
+        if interactive {
+            let (lw, lh) = (w.div_ceil(2), h.div_ceil(2));
+            if self.scratch.len() != (lw as usize) * (lh as usize) * 4 {
+                self.scratch = vec![0; (lw as usize) * (lh as usize) * 4];
+            }
+            // 视口缩放 0.5：低清缓冲的屏幕坐标 = 全屏坐标 × 0.5
+            //（旋转/翻转为线性变换，缩放可交换）
+            let vp = self.doc.viewport().clone();
+            let (pan_x, pan_y) = vp.pan();
+            let zoom = vp.zoom();
+            {
+                let v = self.doc.viewport_mut();
+                v.set_pan(pan_x * 0.5, pan_y * 0.5);
+                v.set_zoom((zoom * 0.5).max(crate::viewport::MIN_ZOOM));
+            }
+            let bg = self.doc.background();
+            self.renderer.composite(
+                &self.doc,
+                &mut self.scratch,
+                lw,
+                Rect::new(0, 0, lw, lh),
+                Some(bg),
+            );
+            // 恢复视口
+            {
+                let v = self.doc.viewport_mut();
+                v.set_pan(pan_x, pan_y);
+                v.set_zoom(zoom);
+            }
+            // 最近邻上采样到全帧（行/像素复制，内存带宽受限 ~3ms @5.6MP）
+            // 2× 最近邻特化：源行展开一次（u64 双像素）→ 两目标行 memcpy
+            if self.row2.len() != w as usize * 4 {
+                self.row2 = vec![0u8; w as usize * 4];
+            }
+            let w2 = lw as usize;
+            let mut row2 = std::mem::take(&mut self.row2);
+            for sy in 0..lh as usize {
+                let src_row = &self.scratch[sy * w2 * 4..][..w2 * 4];
+                // 行内 2x 展开：每源像素 u64 双写
+                for sx in 0..w2 {
+                    let p4 = &src_row[sx * 4..sx * 4 + 4];
+                    let d8 = &mut row2[sx * 8..sx * 8 + 8];
+                    d8[..4].copy_from_slice(p4);
+                    d8[4..].copy_from_slice(p4);
+                }
+                // 奇数宽尾像素补齐
+                let even_w = w as usize & !1;
+                if even_w < w as usize {
+                    let last = &src_row[(w2 - 1) * 4..][..4];
+                    row2[even_w * 4..even_w * 4 + 4].copy_from_slice(last);
+                }
+                // 写两目标行（memcpy 级）
+                let y0 = sy * 2;
+                let y1 = (y0 + 1).min(h as usize - 1);
+                self.frame[y0 * w as usize * 4..][..w as usize * 4].copy_from_slice(&row2);
+                self.frame[y1 * w as usize * 4..][..w as usize * 4].copy_from_slice(&row2);
+            }
+            self.row2 = row2;
+            self.stamp_shape_preview(w, full);
+            surface.present_cpu(&self.frame, self.size, Some(full));
+            self.dirty = Dirty::Clean;
+            return;
+        }
+        let bg = self.doc.background();
+        self.renderer
+            .composite(&self.doc, &mut self.frame, w, region, Some(bg));
+        self.stamp_shape_preview(w, region);
         surface.present_cpu(&self.frame, self.size, Some(region));
         self.dirty = Dirty::Clean;
     }
@@ -2475,6 +2611,9 @@ impl Engine {
             PointerPhase::Up | PointerPhase::Cancel => {
                 self.touches.remove(&sample.id);
                 if self.touches.len() < 2 {
+                    if self.gesture.is_some() {
+                        self.dirty = Dirty::All; // 手势结束：全分辨率精化一帧
+                    }
                     self.gesture = None;
                 }
                 if self.touches.is_empty() {
@@ -2823,11 +2962,7 @@ impl Engine {
     /// 小地图：内容包围盒缩放到 max_w×max_h 内的 PNG（白底）。
     /// 返回 (png, 输出宽, 输出高, 内容包围盒 x/y/w/h)——
     /// 壳层以"包围盒 ↔ 小地图"线性映射换算拖动位置与视口框。
-    pub fn minimap_png(
-        &mut self,
-        max_w: u32,
-        max_h: u32,
-    ) -> Option<(Vec<u8>, u32, u32, f64, f64, f64, f64)> {
+    pub fn minimap_png(&mut self, max_w: u32, max_h: u32) -> Option<MinimapOut> {
         if max_w == 0 || max_h == 0 {
             return None;
         }
@@ -3062,13 +3197,16 @@ impl Engine {
                     raster,
                     bbox,
                 } => {
-                    // 光栅缺失时尝试 swash（字体已设置）
+                    // 光栅缺失时尝试 swash（字体已设置；text 特性门控）
+                    #[cfg(feature = "text")]
                     if raster.is_none() {
                         if let Some(f) = font.as_ref() {
                             *raster = swash_text_raster(f, text, *pos, *size, *color)
                                 .map(std::sync::Arc::new);
                         }
                     }
+                    #[cfg(not(feature = "text"))]
+                    let _ = (&font, text, size, color);
                     if let Some(ra) = raster.as_ref() {
                         let (ox, oy) = (
                             pos.0.round() as i64 + ra.dx,
@@ -3144,6 +3282,26 @@ impl UndoGroup {
             _ => &[],
         }
     }
+}
+
+/// 小地图产物：PNG 字节 + 输出尺寸 + 内容包围盒。
+pub type MinimapOut = (Vec<u8>, u32, u32, f64, f64, f64, f64);
+
+/// 计时起点（wasm32 无 std::time——返回 None，日志退化为无耗时）。
+fn timing_start() -> Option<std::time::Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(std::time::Instant::now())
+    }
+}
+
+/// 计时毫秒（起点 None 时返回 None）。
+fn timing_ms(t: Option<std::time::Instant>) -> Option<f64> {
+    t.map(|t0| t0.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// 读瓦片网格画布坐标处像素（无瓦片 = 全透明）。
