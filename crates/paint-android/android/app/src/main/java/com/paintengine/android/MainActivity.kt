@@ -122,11 +122,10 @@ class MainActivity : Activity() {
         // 悬浮标签点击 = 快捷开关（正式入口在"设置"）
         fpsLabel.setOnClickListener { applyFpsMonitor(fpsLabel.visibility != View.VISIBLE) }
         stage.addView(fpsLabel)
-        stage.addView(minimapView, android.widget.FrameLayout.LayoutParams(
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
-            android.view.Gravity.TOP or android.view.Gravity.END,
-        ))
+        // 注意：不传 LayoutParams——WRAP_CONTENT 会让无内容测量的 View 铺满父容器
+        // （ getDefaultSize AT_MOST 取 spec 尺寸），整个画布被半透明深底盖黑。
+        // MinimapView init 里自设了 170dp 精确尺寸 + 右上角边距。
+        stage.addView(minimapView)
         // 500ms 采样：帧率 = 呈现计数差值 / 采样间隔（引擎无平台时钟）
         var lastCount = 0L
         var lastTime = android.os.SystemClock.elapsedRealtime()
@@ -245,6 +244,9 @@ class MainActivity : Activity() {
                     TAG,
                     "[restore] 已恢复 ${bytes.size} 字节（解码 ${android.os.SystemClock.elapsedRealtime() - t}ms，首帧后）",
                 )
+                // 关键：loadOra 只置引擎脏区，必须 invalidate 触发 onDraw 重合成——
+                // 否则画布停留在首帧前的空位图（透明黑）
+                paintView.invalidate()
                 Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
             } else {
                 android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
@@ -252,6 +254,7 @@ class MainActivity : Activity() {
         } else if (bytes != null) {
             android.util.Log.i(TAG, "[restore] 首帧后用户已落笔，跳过恢复")
         }
+        paintView.invalidate() // 无档也兜底一帧（尺寸就绪后的正式首绘）
         ensureFont()
     }
 
@@ -829,6 +832,11 @@ class MainActivity : Activity() {
                 lastRefresh = now
                 invalidate()
             }
+        }
+
+        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+            // 固定 170dp 正方形：无视 WRAP_CONTENT（默认 View 的 AT_MOST 会取满父尺寸）
+            setMeasuredDimension(layoutParams.width, layoutParams.height)
         }
 
         override fun onDraw(canvas: android.graphics.Canvas) {
