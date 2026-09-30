@@ -99,7 +99,12 @@ cargo install cargo-ndk
 - 每个 View 实例独享一个引擎实例,多 View 共存互不干扰;
 - **所有方法必须在 UI 线程调用**(引擎句柄非线程安全);
 - 尺寸/焦点/触摸由 View 自动处理,宿主只调「控制面」;
-- 画布坐标 = 视图物理像素坐标,缩放/旋转由引擎视口内部换算。
+- 画布坐标 = 视图物理像素坐标,缩放/旋转由引擎视口内部换算;
+- **冷启动提示**(演示 app 实测):`loadOra`/`setTextFont` 等重操作
+  (大字体解析、存档解码可达秒级)不要放在 `onCreate` 首帧路径——
+  文件读放后台线程,解码经 `View.post` 延后到首帧之后;启动窗口
+  背景应与首帧布局同色(见 `app/src/main/res/drawable/launch_background.xml`)
+  以消除白屏感。分段计时可参照 MainActivity 的 `[startup]` 日志。
 
 ### 工具码常量(`PaintEngineView` 伴生对象)
 
@@ -229,7 +234,7 @@ logcat 过滤 tag `paintEngine`;日志级别经 `nativeSetLogLevel`(预留接口
 nativeCreate ()J                          nativeUndo (J)Z
 nativeDestroy (J)V                        nativeRedo (J)Z
 nativeResize (JIIF)V                      nativeAddLayer (J)Z
-nativePointer (JIDDDDDIJ)V                nativeMergeDown (J)Z
+nativePointer (JIIDDDDDIJ)V              nativeMergeDown (J)Z
 nativePenInRange (JZ)V                    nativeFlatten (J)Z
 nativeFocus (JZ)V                         nativeLayerCount (J)I
 nativeRender (JLandroid/graphics/Bitmap;)Z nativeActiveLayerIndex (J)I

@@ -758,7 +758,7 @@ fn native_methods() -> Vec<NativeMethod> {
         entry("nativeResize", "(JIIF)V", native_resize as *mut c_void),
         entry(
             "nativePointer",
-            "(JIDDDDDIJ)V",
+            "(JIIDDDDDIJ)V",
             native_pointer as *mut c_void,
         ),
         entry(
@@ -943,6 +943,10 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) 
         }
         Err(e) => {
             log::error!("[app] RegisterNatives 失败（类名或签名不匹配？）：{e}");
+            // 打印 pending exception 明细（NoSuchMethodError 会点名错配的方法）
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+            }
             jni::sys::JNI_ERR
         }
     }
