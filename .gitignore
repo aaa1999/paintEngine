@@ -8,11 +8,13 @@
 # wasm-pack 生成产物
 /crates/paint-wasm/www/pkg/
 
-# Android 构建产物（jniLibs 由 NDK 交叉编译产出，见 crates/paint-android/README.md）
-/crates/paint-android/android/app/src/main/jniLibs/**/*.so
+# Android 构建产物（jniLibs 由 cargo-ndk 交叉编译产出，见 crates/paint-android/README.md）
+/crates/paint-android/android/library/src/main/jniLibs/**/*.so
 /crates/paint-android/android/app/build/
+/crates/paint-android/android/library/build/
 /crates/paint-android/android/build/
 /crates/paint-android/android/.gradle/
+/crates/paint-android/android/.kotlin/
 
 # OS
 .DS_Store

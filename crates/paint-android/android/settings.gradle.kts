@@ -13,4 +13,5 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "paintEngine"
+include(":library")
 include(":app")

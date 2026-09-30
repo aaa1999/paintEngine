@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = "com.paintengine.android"
+    namespace = "com.paintengine.android.app"
     compileSdk = 35
 
     defaultConfig {
@@ -28,5 +28,6 @@ android {
 }
 
 dependencies {
-    // 纯框架 UI，无 androidx 运行时依赖——缩小 APK 与构建依赖面
+    // 引擎壳：PaintEngineView + libpaint_android.so（AAR 亦可经 mavenLocal 消费）
+    implementation(project(":library"))
 }
