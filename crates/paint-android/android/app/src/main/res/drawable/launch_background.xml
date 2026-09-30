@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动窗口背景：模拟首帧布局（上方画布白，下方工具区灰条），
+     使 launch window → 首帧 的过渡视觉无感。 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <color android:color="@color/launch_canvas" />
+    </item>
+    <item
+        android:gravity="bottom"
+        android:height="120dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/launch_bar" />
+        </shape>
+    </item>
+</layer-list>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动窗口底色：与首帧一致（画布白 + 工具区浅灰），消白闪 -->
+    <color name="launch_canvas">#FFFFFF</color>
+    <color name="launch_bar">#F3F3F3</color>
+</resources>

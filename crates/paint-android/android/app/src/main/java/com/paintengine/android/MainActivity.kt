@@ -12,6 +12,7 @@ import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.Button
 import android.widget.EditText
 import android.widget.HorizontalScrollView
@@ -21,6 +22,7 @@ import android.widget.TextView
 import android.widget.Toast
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import kotlin.concurrent.thread
 
 /**
  * paintEngine Android 演示 Activity。
@@ -32,6 +34,9 @@ class MainActivity : Activity() {
 
     private companion object {
         const val TAG = "paintEngine"
+
+        /** 首帧后延时多久开始存档解码：让首帧先上屏 + idle 回报，不参与白屏。 */
+        const val RESTORE_DELAY_MS = 100L
     }
 
     private lateinit var paintView: PaintEngineView
@@ -54,8 +59,17 @@ class MainActivity : Activity() {
     // 文字字号（对话框滑杆）
     private var textSize = 48f
 
-    // 系统字体缓存（文字工具用）
-    private var fontBytes: ByteArray? = null
+    // 系统字体缓存（文字工具用）。后台预读线程与 UI 兜底路径都会触碰 → volatile
+    @Volatile private var fontBytes: ByteArray? = null
+
+    /** 字体已喂给引擎（setTextFont 每次调用都重新解析字体，须只喂一次）。 */
+    private var fontOnEngine = false
+
+    /** 后台预读的自动存档字节；首帧后就位。 */
+    @Volatile private var pendingAutosave: ByteArray? = null
+
+    /** 启动计时原点（Activity 实例化时刻，≈ 冷启动进程内最早可得）。 */
+    private val bootT0 = android.os.SystemClock.elapsedRealtime()
 
     private val pickImage = 1001
     private val pickPdf = 1002
@@ -155,12 +169,79 @@ class MainActivity : Activity() {
         // 文字对象字体（懒加载系统字体，首次点击文字时设置）
         paintView.onTextAnchor = { cx, cy -> showTextInput(cx, cy) }
         paintView.onTextEdit = { t, sz, _ -> showTextInput(0.0, 0.0, existing = t, existingSize = sz) }
-        ensureFont()
 
-        // 崩溃/后台回收恢复：上次自动保存的工程
-        maybeRestoreAutosave()
+        // 启动关键路径优化：重 I/O（CJK 字体读取 / 自动存档读取）全部移到
+        // 后台线程预读，首帧就绪后才回到 UI 线程落位（存档解码 → 字体喂引擎）。
+        // 此前 ensureFont + maybeRestoreAutosave 同步跑在 onCreate 里，
+        // 实测把首帧拖到 2.3s+（白屏主体）。
+        warmStartupDataAsync()
+        paintView.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                paintView.viewTreeObserver.removeOnPreDrawListener(this)
+                android.util.Log.i(
+                    TAG,
+                    "[startup] 首帧就绪 ${android.os.SystemClock.elapsedRealtime() - bootT0}ms（自 Activity 构造）",
+                )
+                reportFullyDrawn()
+                // 重落位（存档解码 ~2s）绝不能在 onPreDraw 里做——会把首帧
+                // 堵住。postDelayed：先让这一帧上屏、idle 信号回报，再开始解码。
+                paintView.postDelayed({ applyStartupData() }, RESTORE_DELAY_MS)
+                return true
+            }
+        })
 
         selectTool(PaintEngineView.TOOL_BRUSH)
+        android.util.Log.i(
+            TAG,
+            "[startup] onCreate 完成 ${android.os.SystemClock.elapsedRealtime() - bootT0}ms",
+        )
+    }
+
+    /** 后台预读启动期重文件：字体 + 自动存档（并行，不碰 UI/引擎）。 */
+    private fun warmStartupDataAsync() {
+        thread(name = "startup-font") {
+            val t = android.os.SystemClock.elapsedRealtime()
+            val b = loadFont()
+            android.util.Log.i(
+                TAG,
+                "[startup] 字体预读 ${b?.size ?: 0} 字节（${android.os.SystemClock.elapsedRealtime() - t}ms，后台线程）",
+            )
+        }
+        thread(name = "startup-autosave") {
+            val f = autosaveFile()
+            if (!f.exists()) {
+                android.util.Log.i(TAG, "[restore] 无自动保存档")
+                return@thread
+            }
+            val t = android.os.SystemClock.elapsedRealtime()
+            pendingAutosave = runCatching { f.readBytes() }.getOrNull()
+            android.util.Log.i(
+                TAG,
+                "[startup] 存档预读 ${pendingAutosave?.size ?: 0} 字节（${android.os.SystemClock.elapsedRealtime() - t}ms，后台线程）",
+            )
+        }
+    }
+
+    /** 首帧后的落位（UI 线程）：先恢复会话（内容优先），再喂字体。 */
+    private fun applyStartupData() {
+        val bytes = pendingAutosave
+        if (bytes != null && paintView.editCount() == 0L) {
+            val t = android.os.SystemClock.elapsedRealtime()
+            val ok = runCatching { paintView.loadOra(bytes) }.getOrDefault(false)
+            if (ok) {
+                savedEditCount = paintView.editCount()
+                android.util.Log.i(
+                    TAG,
+                    "[restore] 已恢复 ${bytes.size} 字节（解码 ${android.os.SystemClock.elapsedRealtime() - t}ms，首帧后）",
+                )
+                Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
+            } else {
+                android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
+            }
+        } else if (bytes != null) {
+            android.util.Log.i(TAG, "[restore] 首帧后用户已落笔，跳过恢复")
+        }
+        ensureFont()
     }
 
     private var savedEditCount = 0L
@@ -196,28 +277,21 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun maybeRestoreAutosave() {
-        val f = autosaveFile()
-        if (!f.exists()) {
-            android.util.Log.i(TAG, "[restore] 无自动保存档")
-            return
-        }
-        runCatching {
-            val bytes = f.readBytes()
-            if (paintView.loadOra(bytes)) {
-                savedEditCount = paintView.editCount()
-                android.util.Log.i(TAG, "[restore] 已恢复 ${bytes.size} 字节")
-                Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
-            } else {
-                android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
-            }
-        }
-    }
-
-    /** 文字字体（对象光栅化）：读系统字体一次并设置。 */
+    /** 文字字体（对象光栅化）：读系统字体一次并设置。
+     *  setTextFont 每次调用都让引擎重新解析字体，故用 fontOnEngine 保证只喂一次；
+     *  常规路径由启动预读 + 首帧后落位完成，这里只是文字工具被提前使用时的同步兜底。 */
     private fun ensureFont() {
         if (fontBytes == null) fontBytes = loadFont()
-        fontBytes?.let { paintView.setTextFont(it) }
+        val b = fontBytes
+        if (!fontOnEngine && b != null) {
+            val t = android.os.SystemClock.elapsedRealtime()
+            paintView.setTextFont(b)
+            fontOnEngine = true
+            android.util.Log.i(
+                TAG,
+                "[startup] 字体已喂引擎（解析 ${android.os.SystemClock.elapsedRealtime() - t}ms）",
+            )
+        }
     }
 
     private fun rowParams() = LinearLayout.LayoutParams(
