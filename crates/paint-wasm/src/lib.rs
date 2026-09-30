@@ -20,16 +20,143 @@ use paint_core::render::{EngineConfig, Surface};
 use paint_core::{BlendMode, Color, Engine, PlatformEvent, Rect, Tool};
 use paint_render::SoftwareRenderer;
 
+/// JS 工具名 ↔ 引擎 Tool。形状名形如 "rect" / "rect-fill"。
+fn parse_tool(name: &str) -> Tool {
+    use paint_core::ShapeKind;
+    match name {
+        "eraser" => Tool::Eraser,
+        "mask" => Tool::Mask,
+        "text" => Tool::Text,
+        "fill" => Tool::Fill { tolerance: 32 },
+        "line" => Tool::Shape {
+            kind: ShapeKind::Line,
+            fill: false,
+        },
+        "line-fill" => Tool::Shape {
+            kind: ShapeKind::Line,
+            fill: true,
+        },
+        "rect" => Tool::Shape {
+            kind: ShapeKind::Rect,
+            fill: false,
+        },
+        "rect-fill" => Tool::Shape {
+            kind: ShapeKind::Rect,
+            fill: true,
+        },
+        "ellipse" => Tool::Shape {
+            kind: ShapeKind::Ellipse,
+            fill: false,
+        },
+        "ellipse-fill" => Tool::Shape {
+            kind: ShapeKind::Ellipse,
+            fill: true,
+        },
+        _ => Tool::Brush,
+    }
+}
+
+fn tool_name(tool: Tool) -> String {
+    use paint_core::ShapeKind;
+    match tool {
+        Tool::Brush => "brush".into(),
+        Tool::Eraser => "eraser".into(),
+        Tool::Mask => "mask".into(),
+        Tool::Text => "text".into(),
+        Tool::Fill { .. } => "fill".into(),
+        Tool::Shape { kind, fill } => {
+            let base = match kind {
+                ShapeKind::Line => "line",
+                ShapeKind::Rect => "rect",
+                ShapeKind::Ellipse => "ellipse",
+            };
+            if fill {
+                format!("{base}-fill")
+            } else {
+                base.into()
+            }
+        }
+    }
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    fn info(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    fn warn(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    fn error(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    fn debug(s: &str);
+}
+
+/// console 日志器（级别：URL ?log=debug 或 localStorage pe_log，默认 info）。
+struct ConsoleLogger {
+    level: log::LevelFilter,
+}
+
+impl log::Log for ConsoleLogger {
+    fn enabled(&self, m: &log::Metadata) -> bool {
+        m.level() <= self.level
+    }
+    fn log(&self, r: &log::Record) {
+        if !self.enabled(r.metadata()) {
+            return;
+        }
+        let line = format!("[{}] {}", r.target(), r.args());
+        match r.level() {
+            log::Level::Error => error(&line),
+            log::Level::Warn => warn(&line),
+            log::Level::Info => info(&line),
+            _ => debug(&line),
+        }
+    }
+    fn flush(&self) {}
+}
+
+fn init_console_logger() {
+    let level = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .and_then(|q| {
+            q.trim_start_matches('?')
+                .split('&')
+                .find_map(|p| p.strip_prefix("log="))
+                .map(|v| v.to_string())
+        })
+        .or_else(|| {
+            web_sys::window().and_then(|w| w.local_storage().ok().flatten()).and_then(|s| {
+                s.get_item("pe_log").ok().flatten()
+            })
+        })
+        .and_then(|v| v.parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Info);
+    let _ = log::set_boxed_logger(Box::new(ConsoleLogger { level }));
+    log::set_max_level(level);
+    log::info!("[app] Web 壳日志就绪（级别 {level}，?log=debug 可调）");
 }
 
 type PointerClosure = Closure<dyn FnMut(PointerEvent)>;
 type IdleClosure = Closure<dyn FnMut()>;
 type WheelClosure = Closure<dyn FnMut(web_sys::WheelEvent)>;
 type KeyClosure = Closure<dyn FnMut(web_sys::KeyboardEvent)>;
+
+/// 浏览器直行 RGBA（getImageData）→ 引擎预乘光栅。
+fn wasm_raster(rgba: Vec<u8>, w: u32, h: u32, dx: i64, dy: i64) -> Option<paint_core::layer::TextRaster> {
+    if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let mut premul = rgba;
+    for px in premul.as_chunks_mut::<4>().0 {
+        let a = px[3] as u32;
+        for c in px.iter_mut().take(3) {
+            *c = ((*c as u32 * a + 127) / 255) as u8;
+        }
+    }
+    Some(paint_core::layer::TextRaster { premul, w, h, dx, dy })
+}
 
 struct Inner {
     engine: Engine,
@@ -60,6 +187,7 @@ pub struct PaintApp {
 impl PaintApp {
     #[wasm_bindgen(constructor)]
     pub fn new(canvas: HtmlCanvasElement) -> Result<PaintApp, JsValue> {
+        init_console_logger();
         let ctx: CanvasRenderingContext2d = canvas
             .get_context("2d")?
             .ok_or(JsValue::from_str("无法获取 2d 上下文"))?
@@ -112,20 +240,103 @@ impl PaintApp {
     // ── 对 JS 暴露的控制面 ──
 
     pub fn set_tool(&self, tool: &str) {
-        let t = match tool {
-            "eraser" => Tool::Eraser,
-            "mask" => Tool::Mask,
-            _ => Tool::Brush,
-        };
+        let t = parse_tool(tool);
         self.inner.borrow_mut().engine.set_tool(t);
     }
 
     pub fn tool(&self) -> String {
-        match self.inner.borrow().engine.tool() {
-            Tool::Eraser => "eraser".into(),
-            Tool::Mask => "mask".into(),
-            Tool::Brush => "brush".into(),
-        }
+        tool_name(self.inner.borrow().engine.tool())
+    }
+
+    /// 文字工具锚点（画布坐标，一次性取走）。JS 在 pointerup 后轮询。
+    pub fn take_text_anchor(&self) -> Option<Vec<f64>> {
+        self.inner
+            .borrow_mut()
+            .engine
+            .take_text_anchor()
+            .map(|(x, y)| vec![x, y])
+    }
+
+    /// 命中的文字对象信息（预填编辑框）：[text, size, rrggbb]。
+    pub fn take_text_edit(&self) -> Option<Vec<String>> {
+        self.inner
+            .borrow_mut()
+            .engine
+            .take_text_edit()
+            .map(|(t, s, c)| vec![t, format!("{s}"), format!("{:02X}{:02X}{:02X}", c.r, c.g, c.b)])
+    }
+
+    /// 新增文字对象（浏览器渲染 raster：直行 RGBA → 预乘）。
+    /// `x, y` 基线原点；`dx, dy` 光栅相对 (x,y) 偏移。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_text_object(
+        &self,
+        text: String,
+        size: f32,
+        x: f64,
+        y: f64,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        dx: i64,
+        dy: i64,
+    ) -> bool {
+        let raster = crate::wasm_raster(rgba, w, h, dx, dy);
+        let mut inner = self.inner.borrow_mut();
+        inner.engine.add_text_object((x, y), &text, size, raster)
+    }
+
+    /// 更新命中的文字对象。
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_text_object(
+        &self,
+        text: String,
+        size: f32,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        dx: i64,
+        dy: i64,
+    ) -> bool {
+        let raster = crate::wasm_raster(rgba, w, h, dx, dy);
+        let mut inner = self.inner.borrow_mut();
+        inner.engine.update_text_object(&text, size, raster)
+    }
+
+    /// 删除命中的文字对象。
+    pub fn delete_text_object(&self) -> bool {
+        self.inner.borrow_mut().engine.delete_text_object()
+    }
+
+    /// 编辑计数（自动保存脏检查）。
+    pub fn edit_count(&self) -> u64 {
+        self.inner.borrow().engine.edit_count()
+    }
+
+    /// 呈现帧计数（单调；监控关闭时冻结）。壳层采样差值算帧率。
+    pub fn render_count(&self) -> f64 {
+        self.inner.borrow().engine.render_count() as f64
+    }
+
+    /// 帧率监控开关。
+    pub fn set_fps_monitor(&self, on: bool) {
+        self.inner.borrow_mut().engine.set_fps_monitor(on);
+    }
+
+    /// 浏览器渲染的文字位图（直行 RGBA）落墨到锚点（alpha over，入撤销）。
+    /// Web 文字走 Canvas2D 系统字体渲染，绕开字体文件分发。
+    pub fn paste_text_rgba(
+        &self,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        inner
+            .engine
+            .paste_rgba_at(&rgba, w, h, x.round() as i64, y.round() as i64)
     }
 
     pub fn set_brush_size(&self, size: f32) {

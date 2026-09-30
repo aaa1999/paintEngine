@@ -967,7 +967,7 @@ impl Renderer for WgpuRenderer {
                         x: tx as i32,
                         y: ty as i32,
                     };
-                    if let Some(t) = layer.tiles.get(id) {
+                    if let Some(t) = layer.content().get(id) {
                         uploads.push((lid.to_raw(), id, t.clone()));
                     }
                 }

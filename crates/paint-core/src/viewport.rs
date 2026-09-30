@@ -48,6 +48,13 @@ impl Viewport {
         self.rotation
     }
 
+    /// 绝对设置平移（小地图定位等外部视口控制用）。
+    pub fn set_pan(&mut self, px: f64, py: f64) {
+        self.pan_x = px;
+        self.pan_y = py;
+        self.rev += 1;
+    }
+
     /// 水平翻转状态。
     pub fn flip_x(&self) -> bool {
         self.flip_x

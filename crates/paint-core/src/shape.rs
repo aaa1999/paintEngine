@@ -131,6 +131,99 @@ pub fn line_dabs(
         .collect()
 }
 
+/// 几何形状种类（形状工具）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeKind {
+    Line,
+    Rect,
+    Ellipse,
+}
+
+/// 形状的画布坐标包围盒（外扩 `margin`）。
+pub fn shape_bbox(
+    kind: ShapeKind,
+    a: (f64, f64),
+    b: (f64, f64),
+    margin: f64,
+) -> (f64, f64, f64, f64) {
+    match kind {
+        ShapeKind::Line => (
+            a.0.min(b.0) - margin,
+            a.1.min(b.1) - margin,
+            a.0.max(b.0) + margin,
+            a.1.max(b.1) + margin,
+        ),
+        ShapeKind::Rect | ShapeKind::Ellipse => (
+            a.0.min(b.0) - margin,
+            a.1.min(b.1) - margin,
+            a.0.max(b.0) + margin,
+            a.1.max(b.1) + margin,
+        ),
+    }
+}
+
+/// 直线段 dab 链（内部复用 [`line_dabs`]）。
+#[allow(clippy::too_many_arguments)]
+fn seg_dabs(
+    out: &mut Vec<Dab>,
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+    radius: f32,
+    hardness: f32,
+    color: Color,
+    alpha: f32,
+) {
+    out.extend(line_dabs(x0, y0, x1, y1, radius, hardness, color, alpha));
+}
+
+/// 形状轮廓 → dab 链（描边模式）。`a` 拖拽起点、`b` 当前点（画布坐标）。
+/// 复用笔刷参数——马克笔画椭圆即马克笔质感。填充模式不走此函数
+/// （由 [`ShapeWriter`] 直接写像素）。
+pub fn shape_dabs(
+    kind: ShapeKind,
+    a: (f64, f64),
+    b: (f64, f64),
+    radius: f32,
+    hardness: f32,
+    color: Color,
+    alpha: f32,
+) -> Vec<Dab> {
+    let mut out = Vec::new();
+    match kind {
+        ShapeKind::Line => {
+            seg_dabs(&mut out, a.0, a.1, b.0, b.1, radius, hardness, color, alpha);
+        }
+        ShapeKind::Rect => {
+            let (x0, y0) = (a.0.min(b.0), a.1.min(b.1));
+            let (x1, y1) = (a.0.max(b.0), a.1.max(b.1));
+            seg_dabs(&mut out, x0, y0, x1, y0, radius, hardness, color, alpha);
+            seg_dabs(&mut out, x1, y0, x1, y1, radius, hardness, color, alpha);
+            seg_dabs(&mut out, x1, y1, x0, y1, radius, hardness, color, alpha);
+            seg_dabs(&mut out, x0, y1, x0, y0, radius, hardness, color, alpha);
+        }
+        ShapeKind::Ellipse => {
+            let cx = (a.0 + b.0) / 2.0;
+            let cy = (a.1 + b.1) / 2.0;
+            let (rx, ry) = (((b.0 - a.0) / 2.0).abs(), ((b.1 - a.1) / 2.0).abs());
+            let n = ((rx + ry) * 4.0).max(24.0) as usize;
+            let mut px = cx + rx;
+            let mut py = cy;
+            for i in 1..=n {
+                let ang = i as f64 / n as f64 * std::f64::consts::TAU;
+                let nx = cx + ang.cos() * rx;
+                let ny = cy + ang.sin() * ry;
+                seg_dabs(&mut out, px, py, nx, ny, radius, hardness, color, alpha);
+                px = nx;
+                py = ny;
+            }
+        }
+    }
+    out
+}
+
+
 /// swash 文本光栅化到网格。`x, y` 为首字基线左原点（画布坐标）。
 /// 返回写入的包围盒，失败（字体无效）返回 None。
 #[cfg(feature = "text")]

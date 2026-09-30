@@ -75,11 +75,77 @@ fn decode_png_straight(png: &[u8], out: &mut Vec<u8>) -> Option<(usize, usize)> 
 
 mod panel;
 
+fn init_logger() {
+    let level = std::env::var("PAINT_LOG")
+        .ok()
+        .and_then(|v| v.parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Info);
+    // LevelFilter 非 const 构造：用 OnceLock 重建
+    struct CfgLogger(log::LevelFilter);
+    impl log::Log for CfgLogger {
+        fn enabled(&self, m: &log::Metadata) -> bool {
+            m.level() <= self.0
+        }
+        fn log(&self, r: &log::Record) {
+            if self.enabled(r.metadata()) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let secs = now.as_secs() % 86400;
+                eprintln!(
+                    "{:02}:{:02}:{:02}.{:03} {:<5} [{}] {}",
+                    secs / 3600,
+                    (secs % 3600) / 60,
+                    secs % 60,
+                    now.subsec_millis(),
+                    r.level(),
+                    r.target(),
+                    r.args()
+                );
+            }
+        }
+        fn flush(&self) {}
+    }
+    let _ = log::set_boxed_logger(Box::new(CfgLogger(level)))
+        .map_err(|_| eprintln!("日志器已安装，忽略重复初始化"));
+    log::set_max_level(level);
+    log::info!("[app] 桌面壳启动（日志级别 {level}，PAINT_LOG 可调）");
+}
+
 fn main() {
+    init_logger();
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let mut app = App::new();
     app.load_presets_file();
+    app.init_text_font();
+    app.try_restore_autosave();
     event_loop.run_app(&mut app).unwrap();
+}
+
+/// 桌面自动保存文件路径。
+fn autosave_path() -> std::path::PathBuf {
+    let mut p = std::env::home_dir().unwrap_or_default();
+    p.push(".paintengine_autosave.ora");
+    p
+}
+
+/// 平台常见系统字体（CJK 优先）。swash 支持 ttf/otf/ttc（取集合首字体）。
+fn load_system_font() -> Option<Vec<u8>> {
+    const CANDIDATES: &[&str] = &[
+        "/System/Library/Fonts/PingFang.ttc",                          // macOS 中文
+        "/System/Library/Fonts/Supplemental/Arial.ttf",                // macOS 西文
+        "/System/Library/Fonts/HiraginoSansCJK.ttc",                   // macOS 备选
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",      // Linux 中文
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",             // Linux 西文
+        "C:\\Windows\\Fonts\\msyh.ttc",                                // Windows 雅黑
+        "C:\\Windows\\Fonts\\arial.ttf",                               // Windows 西文
+    ];
+    for path in CANDIDATES {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 #[derive(PartialEq)]
@@ -109,6 +175,16 @@ struct App {
     cursor: (f64, f64),
     t_us: u64,
     tool_before_erase: Option<paint_core::Tool>,
+    /// 文字工具输入态：锚点（画布坐标）+ 已敲入文本 + 是否编辑已有对象。
+    typing: Option<((f64, f64), String, bool)>,
+    /// 自动保存脏检查基准。
+    saved_edit_count: u64,
+    /// 编辑已有文字对象时的原字号（提交时沿用）。
+    text_size_hint: Option<f32>,
+    /// 帧率打印节拍（上次输出时刻）。
+    last_fps_print: Option<std::time::Instant>,
+    /// 帧率采样基线（时刻, 呈现计数）。
+    last_fps_sample: Option<(std::time::Instant, u64)>,
     /// 按需重绘：任何输入/焦点/尺寸事件置位，画完即清。
     needs_redraw: bool,
     layer_panel: panel::Panel,
@@ -143,6 +219,11 @@ impl App {
             cursor: (0.0, 0.0),
             t_us: 0,
             tool_before_erase: None,
+            typing: None,
+            saved_edit_count: 0,
+            text_size_hint: None,
+            last_fps_print: None,
+            last_fps_sample: None,
             layer_panel: panel::Panel::new(),
             needs_redraw: true,
             docs: Vec::new(),
@@ -235,6 +316,56 @@ impl App {
         let mut p = std::path::PathBuf::from(home);
         p.push(".paintengine_presets.txt");
         Some(p)
+    }
+
+    /// 文字对象字体（系统 CJK 回退链）。
+    fn init_text_font(&mut self) {
+        if let Some(f) = load_system_font() {
+            self.engine.set_text_font(f);
+        } else {
+            eprintln!("未找到系统字体：文字对象将不可渲染");
+        }
+    }
+
+    /// 编辑计数检查点式自动保存（每 30 次编辑或退出时落盘）。
+    fn autosave_checkpoint(&mut self) {
+        if self.engine.edit_count() == self.saved_edit_count {
+            return;
+        }
+        if let Some(bytes) = self.engine.save_ora() {
+            if std::fs::write(autosave_path(), &bytes).is_ok() {
+                self.saved_edit_count = self.engine.edit_count();
+            }
+        }
+    }
+
+    fn try_restore_autosave(&mut self) {
+        if let Ok(bytes) = std::fs::read(autosave_path()) {
+            if self.engine.load_ora(&bytes) {
+                self.saved_edit_count = self.engine.edit_count();
+                println!("已恢复上次自动保存（{} KB）", bytes.len() / 1024);
+            }
+        }
+    }
+
+    /// 帧率监控：1s 窗口计数差值（引擎无平台时钟，桌面用 Instant 采样）。
+    fn maybe_print_fps(&mut self) {
+        if !self.engine.fps_monitor_enabled() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = self
+            .last_fps_print
+            .is_none_or(|t| now.duration_since(t).as_secs() >= 1);
+        if due {
+            if let Some((t0, c0)) = self.last_fps_sample {
+                let dt = now.duration_since(t0).as_secs_f32();
+                let rate = (self.engine.render_count() - c0) as f32 / dt;
+                log::info!("[fps] {rate:.1}");
+            }
+            self.last_fps_sample = Some((now, self.engine.render_count()));
+            self.last_fps_print = Some(now);
+        }
     }
 
     fn load_presets_file(&mut self) {
@@ -384,6 +515,40 @@ impl App {
         self.engine.set_tool(next);
     }
 
+    /// 提交文字输入：新增/更新文字对象（非破坏可重编辑）。
+    fn commit_typing(&mut self) {
+        let Some((anchor, text, editing)) = self.typing.take() else {
+            return;
+        };
+        if text.is_empty() {
+            println!("空文字，忽略");
+            return;
+        }
+        let size = self
+            .text_size_hint
+            .take()
+            .unwrap_or_else(|| (self.engine.brush().size * 4.0).clamp(16.0, 200.0));
+        let ok = if editing {
+            self.engine.update_text_object(&text, size, None)
+        } else {
+            self.engine.add_text_object(
+                (anchor.0, anchor.1 + size as f64 * 0.8),
+                &text,
+                size,
+                None,
+            )
+        };
+        println!(
+            "{}：{text}",
+            if ok {
+                if editing { "文字已更新" } else { "文字已插入（可点击重编辑/拖动）" }
+            } else {
+                "文字操作失败（字体不支持？）"
+            }
+        );
+        self.needs_redraw = true;
+    }
+
     fn save_png(&mut self) {
         let path = rfd::FileDialog::new()
             .set_file_name("painting.png")
@@ -482,6 +647,9 @@ impl App {
         let size = window.inner_size();
         let (win_w, win_h) = (size.width, size.height);
         let engine_size = self.engine.frame_size();
+
+        // 帧率监控：每秒输出一次平滑读数（须在 surface 借用前）
+        self.maybe_print_fps();
 
         // 1) 引擎渲染画布帧（借 sb 段 1）
         {
@@ -596,7 +764,11 @@ impl ApplicationHandler for App {
             self.needs_redraw = true;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // 退出前自动保存（编辑计数脏检查）
+                self.autosave_checkpoint();
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 self.on_resize(
                     size.width,
@@ -674,7 +846,7 @@ impl ApplicationHandler for App {
                         let (x, y) = (self.cursor.0 as u32, self.cursor.1 as u32);
                         if let Some(c) = self.engine.pick_color(x, y) {
                             self.engine.brush_mut().color = c;
-                            println!("取色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
+                            log::info!("[color] 取色 #{:02X}{:02X}{:02X}", c.r, c.g, c.b);
                         }
                         return;
                     }
@@ -728,6 +900,15 @@ impl ApplicationHandler for App {
                             phase: PointerPhase::Up,
                             sample,
                         });
+                        // 文字工具：抬手先查命中已有对象（编辑），再查新锚点
+                        if let Some((text, size, _)) = self.engine.take_text_edit() {
+                            self.typing = Some(((0.0, 0.0), text, true));
+                            self.text_size_hint = Some(size);
+                            println!("编辑文字（回车更新 · Del 删除 · Esc 取消）");
+                        } else if let Some(a) = self.engine.take_text_anchor() {
+                            self.typing = Some((a, String::new(), false));
+                            println!("文字输入（Enter 插入 · Esc 取消）：");
+                        }
                     }
                     self.drag = Drag::None;
                 }
@@ -800,6 +981,34 @@ impl ApplicationHandler for App {
                     logical_key, state, ..
                 } = &event;
                 match (logical_key, state) {
+                    // ── 文字输入态优先拦截 ──
+                    (Key::Named(NamedKey::Enter), ElementState::Pressed)
+                        if self.typing.is_some() =>
+                    {
+                        self.commit_typing();
+                    }
+                    (Key::Named(NamedKey::Escape), ElementState::Pressed)
+                        if self.typing.is_some() =>
+                    {
+                        self.typing = None;
+                        println!("文字输入已取消");
+                    }
+                    (Key::Named(NamedKey::Backspace), ElementState::Pressed)
+                        if self.typing.is_some() =>
+                    {
+                        if let Some((_, buf, _)) = self.typing.as_mut() {
+                            buf.pop();
+                            println!("输入：{buf}_");
+                        }
+                    }
+                    (Key::Named(NamedKey::Delete), ElementState::Pressed)
+                        if self.typing.as_ref().is_some_and(|(_, _, ed)| *ed) =>
+                    {
+                        self.typing = None;
+                        if self.engine.delete_text_object() {
+                            println!("文字对象已删除");
+                        }
+                    }
                     (Key::Named(NamedKey::Delete), ElementState::Pressed)
                         if self.engine.has_selection() && !self.engine.transforming() =>
                     {
@@ -820,13 +1029,13 @@ impl ApplicationHandler for App {
                         if self.engine.transforming() =>
                     {
                         self.engine.commit_transform();
-                        println!("变换已提交");
+                        log::info!("[transform] 已提交");
                     }
                     (Key::Named(NamedKey::Escape), ElementState::Pressed)
                         if self.engine.transforming() =>
                     {
                         self.engine.cancel_transform();
-                        println!("变换已取消");
+                        log::info!("[transform] 已取消");
                     }
                     (Key::Named(NamedKey::Space), ElementState::Pressed) => self.space_down = true,
                     (Key::Named(NamedKey::Space), ElementState::Released) => {
@@ -836,6 +1045,18 @@ impl ApplicationHandler for App {
                         let c = c.as_str();
                         let ctrl = self.modifiers.control_key();
                         let shift = self.modifiers.shift_key();
+                        // 文字输入态：吞掉所有可打印字符（不触发快捷键）
+                        if self.typing.is_some() && !ctrl && !self.modifiers.alt_key() {
+                            if let Some((_, buf, _)) = self.typing.as_mut() {
+                                // logical_key 为完整字符（含中文输入法提交）
+                                if c.chars().all(|ch| !ch.is_control()) {
+                                    buf.push_str(c);
+                                    println!("输入：{buf}_");
+                                }
+                            }
+                            self.needs_redraw = true;
+                            return;
+                        }
                         match c {
                             "z" | "Z" if ctrl => {
                                 if shift {
@@ -937,7 +1158,7 @@ impl ApplicationHandler for App {
                             "t" | "T" if ctrl => {
                                 if self.engine.transforming() {
                                     self.engine.commit_transform();
-                                    println!("变换已提交");
+                                    log::info!("[transform] 已提交");
                                 } else if self.engine.begin_transform() {
                                     println!(
                                         "内容变换：拖拽移动 · 滚轮旋转 · Shift+滚轮缩放 · Enter 提交 · Esc 取消"
@@ -1065,6 +1286,53 @@ impl ApplicationHandler for App {
                             "b" | "B" => {
                                 self.engine.set_tool(paint_core::Tool::Brush);
                             }
+                            "s" | "S" if !ctrl => {
+                                // 形状工具：S 循环 线→矩→椭圆；Shift+S 切描边/填充
+                                use paint_core::ShapeKind;
+                                let cur = self.engine.tool();
+                                let (kind, fill) = match cur {
+                                    paint_core::Tool::Shape { kind, fill } => (kind, fill),
+                                    _ => (ShapeKind::Line, shift),
+                                };
+                                if shift {
+                                    let new_fill = !fill;
+                                    self.engine.set_tool(paint_core::Tool::Shape {
+                                        kind,
+                                        fill: new_fill,
+                                    });
+                                    println!("形状：{}", if new_fill { "填充" } else { "描边" });
+                                } else {
+                                    let next = match kind {
+                                        ShapeKind::Line => ShapeKind::Rect,
+                                        ShapeKind::Rect => ShapeKind::Ellipse,
+                                        ShapeKind::Ellipse => ShapeKind::Line,
+                                    };
+                                    self.engine.set_tool(paint_core::Tool::Shape {
+                                        kind: next,
+                                        fill,
+                                    });
+                                    let n = match next {
+                                        ShapeKind::Line => "直线",
+                                        ShapeKind::Rect => "矩形",
+                                        ShapeKind::Ellipse => "椭圆",
+                                    };
+                                    let m = if fill { "填充" } else { "描边" };
+                                    println!("形状工具：{n}（{m}）——拖拽绘制");
+                                }
+                            }
+                            "i" | "I" if !ctrl => {
+                                self.engine.set_tool(paint_core::Tool::Text);
+                                println!("文字工具：点击画布位置后直接输入，Enter 插入 / Esc 取消");
+                            }
+                            "a" | "A" if !ctrl => {
+                                self.engine.set_tool(paint_core::Tool::Fill { tolerance: 32 });
+                                println!("填充工具：点击色块区域填充当前笔刷色");
+                            }
+                            "0" => {
+                                let on = !self.engine.fps_monitor_enabled();
+                                self.engine.set_fps_monitor(on);
+                                println!("帧率监控：{}", if on { "开" } else { "关" });
+                            }
                             "[" => {
                                 let b = self.engine.brush_mut();
                                 b.size = (b.size / 1.25).max(1.0);
@@ -1087,6 +1355,10 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // 检查点式自动保存（每 30 次编辑）
+        if self.engine.edit_count().saturating_sub(self.saved_edit_count) >= 30 {
+            self.autosave_checkpoint();
+        }
         // 按需重绘：仅事件驱动，空闲时零合成零呈现
         if self.needs_redraw {
             if let Some(w) = self.window.as_ref() {

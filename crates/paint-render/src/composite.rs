@@ -164,7 +164,7 @@ pub fn composite(
                 let key = ((ty as u32 as u64) << 32) | (tx as u32 as u64);
                 if key != cache_key {
                     cache = layer
-                        .tiles
+                        .content()
                         .get(TileId {
                             x: tx as i32,
                             y: ty as i32,
@@ -496,7 +496,7 @@ fn mask_nearest(mask: &paint_core::tile::TileGrid, tx: i64, ty: i64, lx: usize, 
 
 /// 父层该像素 alpha（无内容处 = 0）。
 fn parent_alpha_at(pl: &paint_core::layer::Layer, tx: i64, ty: i64, lx: usize, ly: usize) -> f32 {
-    pl.tiles
+    pl.content()
         .get(paint_core::tile::TileId {
             x: tx as i32,
             y: ty as i32,

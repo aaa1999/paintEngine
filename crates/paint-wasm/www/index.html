@@ -52,9 +52,16 @@
   </style>
 </head>
 <body>
+  <div id="tabBar"></div>
   <div id="toolbar">
     <button id="brush" class="active">画笔 (B)</button>
     <button id="eraser">橡皮 (E)</button>
+    <button id="line" title="L">直线</button>
+    <button id="rect" title="R">矩形</button>
+    <button id="ellipse" title="O">椭圆</button>
+    <button id="fillToggle" title="形状描边/填充切换">描边</button>
+    <button id="textTool" title="T">文字</button>
+    <button id="fillTool" title="F">填充</button>
     <button id="mask">蒙版</button>
     <button id="sym" title="X">对称</button>
     <button id="fxInvert" title="反色">反色</button>
@@ -116,7 +123,20 @@
     <input type="file" id="import" accept=".png,.jpg,.jpeg,.webp" title="导入图像" />
     <span id="status">加载中…</span>
   </div>
+    <div id="layerPanel">
+    <div id="layerHeader">图层 <span id="layerCount"></span></div>
+    <div id="layerList"></div>
+    <div id="layerBtns">
+      <button id="lyAdd" title="新建图层">＋</button>
+      <button id="lyDup" title="复制图层">⧉</button>
+      <button id="lyDel" title="删除图层">🗑</button>
+      <button id="lyMerge" title="向下合并">⤓</button>
+      <button id="lyFlat" title="压平">≡</button>
+    </div>
+  </div>
   <canvas id="canvas"></canvas>
-  <script type="module" src="./main.js"></script>
+  <!-- 文字工具输入浮层（绝对定位在点击处） -->
+  <input id="textInput" hidden style="position:absolute;z-index:10;font-size:16px;padding:2px 6px;border:1px solid #1677ff;border-radius:3px;outline:none" />
+  <script type="module" src="./main.js?v=9"></script>
 </body>
 </html>

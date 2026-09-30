@@ -18,6 +18,9 @@ pub struct Document {
     floating: Option<crate::float::Floating>,
     /// 固定画布尺寸（None = 无限画布）。原点恒为 (0,0)。
     canvas: Option<crate::geometry::Rect>,
+    /// 编辑计数：commit/undo/redo 自增。壳层自动保存的脏检查基准
+    /// （记录上次保存时的计数，比较即可判断有无未保存修改）。
+    edit_count: u64,
 }
 
 impl Document {
@@ -34,6 +37,7 @@ impl Document {
             selection: None,
             floating: None,
             canvas: None,
+            edit_count: 0,
         }
     }
 
@@ -49,7 +53,14 @@ impl Document {
             selection: None,
             floating: None,
             canvas: None,
+            edit_count: 0,
         }
+    }
+
+    /// 编辑计数（commit/undo/redo 各 +1）。自动保存脏检查用：
+    /// 壳层记录上次保存时的值，`edit_count() != saved_at` 即有未保存修改。
+    pub fn edit_count(&self) -> u64 {
+        self.edit_count
     }
 
     /// 固定画布尺寸（None = 无限画布）。
@@ -166,15 +177,42 @@ impl Document {
 
     /// 提交撤销组（一笔结束、一次图层操作）。
     pub fn commit(&mut self, group: crate::history::UndoGroup) {
+        // 对象层合并缓存同步的统一收口：本组触及的瓦片若是对象层，
+        // 其 merged 缓存需重合并（笔画/填充/滤镜/变换/导入全走 commit）
+        let touched: Vec<(LayerId, crate::tile::TileId)> = group
+            .ops
+            .iter()
+            .flat_map(|op| match op {
+                crate::history::UndoOp::Tiles(v) => v
+                    .iter()
+                    .map(|(lid, tid, _)| (*lid, *tid))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        log::debug!(
+            "[history] 提交 \"{}\"（触及 {} 瓦片，edit_count={}）",
+            group.label,
+            touched.len(),
+            self.edit_count + 1
+        );
         self.history.push(group);
+        self.edit_count += 1;
+        for (lid, tid) in touched {
+            if let Some(l) = self.layers.try_get_mut(lid) {
+                l.sync_tiles(std::iter::once(tid));
+            }
+        }
     }
 
     /// 撤销（应用逆操作组）。
     pub fn undo(&mut self) -> bool {
         match self.history.pop_undo() {
             Some(g) => {
+                log::debug!("[history] 撤销 \"{}\"", g.label);
                 let inv = g.apply_to(&mut self.layers);
                 self.history.push_redo(inv);
+                self.edit_count += 1;
                 true
             }
             None => false,
@@ -185,8 +223,10 @@ impl Document {
     pub fn redo(&mut self) -> bool {
         match self.history.pop_redo() {
             Some(g) => {
+                log::debug!("[history] 重做 \"{}\"", g.label);
                 let inv = g.apply_to(&mut self.layers);
                 self.history.push_undo(inv);
+                self.edit_count += 1;
                 true
             }
             None => false,

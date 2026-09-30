@@ -9,6 +9,7 @@ name = "paint"
 path = "src/main.rs"
 
 [dependencies]
+log = { workspace = true }
 paint-core = { path = "../paint-core" }
 paint-render = { path = "../paint-render" }
 winit = "0.30"

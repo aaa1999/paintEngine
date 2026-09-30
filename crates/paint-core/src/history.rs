@@ -3,6 +3,8 @@ use crate::tile::{TileGrid, TileId, TileRef, TILE_BYTES};
 
 /// 单条撤销操作。组内按"前向记录顺序"存储，
 /// [`UndoGroup::apply_to`] 以逆序应用并生成对称的逆操作组。
+// InsertLayer 携带整层数据，尺寸差异是设计使然（撤销需要完整恢复）
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum UndoOp {
     /// 恢复瓦片旧内容。`None` 表示该瓦片此前不存在。
@@ -17,6 +19,12 @@ pub enum UndoOp {
     RemoveLayer { id: LayerId },
     /// 把图层移动到索引 `to`（撤销"移动图层"用）。
     MoveLayer { id: LayerId, to: usize },
+    /// 恢复图层对象列表（撤销对象增删改/移动用）。应用后置 obj_stale，
+    /// 引擎侧在渲染前重建光栅化缓存。
+    Objects {
+        id: LayerId,
+        before: Vec<crate::layer::DrawObject>,
+    },
 }
 
 impl UndoOp {
@@ -71,6 +79,8 @@ impl UndoGroup {
                                 layer.tiles.remove(*tid);
                             }
                         }
+                        // 对象层：基础瓦片恢复后同步合并缓存
+                        layer.sync_tiles(std::iter::once(*tid));
                         inv.push((*lid, *tid, before));
                     }
                     inverse.push(UndoOp::Tiles(inv));
@@ -91,6 +101,16 @@ impl UndoGroup {
                 UndoOp::MoveLayer { id, to } => {
                     if let Some((from, _)) = layers.move_layer(*id, *to) {
                         inverse.push(UndoOp::MoveLayer { id: *id, to: from });
+                    }
+                }
+                UndoOp::Objects { id, before } => {
+                    if let Some(layer) = layers.try_get_mut(*id) {
+                        let inv = std::mem::replace(&mut layer.objects, before.clone());
+                        layer.objects_edited();
+                        inverse.push(UndoOp::Objects {
+                            id: *id,
+                            before: inv,
+                        });
                     }
                 }
             }

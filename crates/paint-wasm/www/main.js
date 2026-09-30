@@ -1,35 +1,145 @@
 // paintEngine Web 演示引导。
 // 前置：wasm-pack build crates/paint-wasm --target web --out-dir ../www/pkg
-import init, { PaintApp } from "./pkg/paint_wasm.js";
+import init, { PaintApp } from "./pkg/paint_wasm.js?v=12";
 
 const $ = (id) => document.getElementById(id);
 
 await init();
 const app = new PaintApp($("canvas"));
+window.app = app; // 调试/自动化入口
 $("status").textContent = "就绪";
 
 // 工具切换
 const brushBtn = $("brush");
 const eraserBtn = $("eraser");
+let shapeFill = false;
+const shapeIds = ["line", "rect", "ellipse"];
+function shapeName(base) { return shapeFill ? `${base}-fill` : base; }
 function selectTool(tool) {
   app.set_tool(tool);
-  brushBtn.classList.toggle("active", tool === "brush");
-  eraserBtn.classList.toggle("active", tool === "eraser");
+  const shapeBase = shapeIds.includes(tool) ? tool : null;
+  for (const id of ["brush", "eraser", ...shapeIds, "textTool", "fillTool"]) {
+    const on =
+      (id === "brush" && tool === "brush") ||
+      (id === "eraser" && tool === "eraser") ||
+      (id === "textTool" && tool === "text") ||
+      (id === "fillTool" && tool === "fill") ||
+      (id === shapeBase);
+    $(id).classList.toggle("active", on);
+  }
+  if (tool === "text") $("status").textContent = "文字：点击画布输入";
 }
 brushBtn.onclick = () => selectTool("brush");
 eraserBtn.onclick = () => selectTool("eraser");
+for (const id of shapeIds) $(id).onclick = () => selectTool(id);
+$("fillToggle").onclick = () => {
+  shapeFill = !shapeFill;
+  $("fillToggle").textContent = shapeFill ? "填充" : "描边";
+  $("fillToggle").classList.toggle("active", shapeFill);
+  const cur = app.tool();
+  if (shapeIds.includes(cur)) selectTool(cur);
+};
+$("textTool").onclick = () => selectTool("text");
+$("fillTool").onclick = () => selectTool("fill");
 $("mask").onclick = () => {
   const on = app.tool() === "mask";
   app.set_tool(on ? "brush" : "mask");
   $("mask").classList.toggle("active", !on);
 };
 window.addEventListener("keydown", (e) => {
+  // 文字输入中不劫持按键
+  if (document.activeElement && document.activeElement.id === "textInput") return;
   if (e.key === "b" || e.key === "B") selectTool("brush");
   if (e.key === "e" || e.key === "E") selectTool("eraser");
+  if (e.key === "l" || e.key === "L") selectTool("line");
+  if (e.key === "r" || e.key === "R") selectTool("rect");
+  if (e.key === "o" || e.key === "O") selectTool("ellipse");
+  if (e.key === "t" || e.key === "T") selectTool("text");
+  if (e.key === "f" || e.key === "F") selectTool("fill");
   if ((e.ctrlKey || e.metaKey) && e.key === "z") {
     e.shiftKey ? app.redo() : app.undo();
   }
 });
+
+// ── 文字工具：点击取锚点 → 浮层输入 → 浏览器字体渲染 → 落墨 ──
+const textInput = $("textInput");
+canvasEl().addEventListener("pointerup", (e) => {
+  if (app.tool() !== "text") return;
+  // 先查命中已有对象（编辑/删除），再查新锚点
+  const edit = app.take_text_edit();
+  if (edit && edit.length >= 3) {
+    textInput.hidden = false;
+    textInput.value = edit[0];
+    textInput.style.left = `${e.clientX + 4}px`;
+    textInput.style.top = `${e.clientY - 56}px`;
+    textInput.focus();
+    textInput._anchor = null;
+    textInput._edit = { size: Number(edit[1]) || 48 };
+    $("status").textContent = "编辑文字（Enter 更新 · Esc 取消）";
+    return;
+  }
+  textInput._edit = null;
+  const anchor = app.take_text_anchor();
+  if (anchor && anchor.length >= 2) {
+    textInput.hidden = false;
+    textInput.value = "";
+    textInput.style.left = `${e.clientX + 4}px`;
+    textInput.style.top = `${e.clientY - 28}px`;
+    textInput.focus();
+    textInput._anchor = anchor;
+  }
+});
+function closeTextInput() {
+  textInput.hidden = true;
+  textInput._anchor = null;
+  textInput.blur();
+}
+textInput.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeTextInput(); return; }
+  if (e.key === "Delete" && textInput._edit) {
+    app.delete_text_object();
+    closeTextInput();
+    $("status").textContent = "已删除文字";
+    return;
+  }
+  if (e.key !== "Enter") return;
+  const text = textInput.value;
+  const anchor = textInput._anchor;
+  const edit = textInput._edit;
+  closeTextInput();
+  if (!text) return;
+  const size = edit
+    ? Math.max(12, Math.min(200, edit.size))
+    : Math.max(12, Math.min(200, Number($("size").value) * 4));
+  const color = $("color").value;
+  // 离屏 canvas 用系统字体光栅化（中文原生支持），getImageData 直行 RGBA
+  const c = document.createElement("canvas");
+  const font = `${size}px sans-serif`;
+  const m0 = c.getContext("2d");
+  m0.font = font;
+  const w = Math.max(1, Math.ceil(m0.measureText(text).width));
+  const h = Math.ceil(size * 1.5);
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d");
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(text, 0, size);
+  const img = ctx.getImageData(0, 0, w, h);
+  const rgba = new Uint8Array(img.data.buffer);
+  let ok;
+  if (edit) {
+    ok = app.update_text_object(text, size, rgba, w, h, 0n, BigInt(-Math.round(size)));
+  } else {
+    if (!anchor) return;
+    // 锚点=点击处视觉左上角：基线原点 = anchor + 0.8*size；光栅顶在基线上方 size
+    ok = app.add_text_object(text, size, anchor[0], anchor[1] + size * 0.6, rgba, w, h, 0n, BigInt(-Math.round(size)));
+  }
+  $("status").textContent = ok
+    ? (edit ? `已更新文字 "${text}"` : `已插入文字 "${text}"`)
+    : "文字操作失败";
+});
+textInput.addEventListener("blur", () => { if (!textInput.hidden) closeTextInput(); });
 
 // 笔刷参数
 $("color").oninput = (e) => {
@@ -466,3 +576,114 @@ $("import").onchange = async (e) => {
     $("status").textContent = `已导入 ${file.name}`;
   }
 };
+
+
+// ── 自动保存（IndexedDB）──
+const IDB = {
+  db: null,
+  async open() {
+    if (this.db) return this.db;
+    this.db = await new Promise((res, rej) => {
+      const r = indexedDB.open("paintengine", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("kv");
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return this.db;
+  },
+  async put(key, val) {
+    const db = await this.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(val, key);
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error);
+    });
+  },
+  async get(key) {
+    const db = await this.open();
+    return new Promise((res) => {
+      const tx = db.transaction("kv", "readonly");
+      const rq = tx.objectStore("kv").get(key);
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => res(undefined);
+    });
+  },
+};
+
+let savedEditCount = 0;
+async function autosave() {
+  try {
+    if (app.edit_count() === savedEditCount) return;
+    const bytes = app.export_ora();
+    if (!bytes) return;
+    await IDB.put("autosave", bytes);
+    savedEditCount = app.edit_count();
+  } catch (e) { console.warn("自动保存失败", e); }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") autosave();
+});
+window.addEventListener("beforeunload", () => autosave());
+setInterval(autosave, 30000);
+
+// 启动恢复
+(async () => {
+  try {
+    const bytes = await IDB.get("autosave");
+    console.log("[autosave-restore]", bytes ? bytes.byteLength : "none"); localStorage.setItem("__asdbg", bytes ? String(bytes.byteLength) : "none");
+    if (bytes && bytes.byteLength > 100) {
+      if (app.import_ora(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes))) {
+        savedEditCount = app.edit_count();
+        $("status").textContent = "已恢复上次会话（自动保存）";
+        console.log("[autosave-restore] ok"); localStorage.setItem("__asdbg", localStorage.getItem("__asdbg") + ":ok");
+      } else {
+        console.log("[autosave-restore] import failed");
+      }
+    }
+  } catch (e) { console.warn("[autosave-restore] ERR", e); localStorage.setItem("__asdbg", "ERR:" + e.message); }
+})();
+
+// ── 帧率监控（配置：点击悬浮框开关，localStorage 持久化，默认开）──
+const fpsBox = document.createElement("div");
+fpsBox.id = "fpsBox";
+fpsBox.title = "点击开关帧率监控";
+Object.assign(fpsBox.style, {
+  position: "fixed", left: "8px", top: "52px", zIndex: 20,
+  background: "rgba(0,0,0,0.6)", color: "#7fe388",
+  font: "12px/1.6 ui-monospace,monospace", padding: "2px 8px",
+  borderRadius: "4px", cursor: "pointer", userSelect: "none",
+});
+fpsBox.textContent = "FPS --";
+document.body.appendChild(fpsBox);
+let fpsOn = localStorage.getItem("pe_fps_monitor") !== "0";
+app.set_fps_monitor(fpsOn);
+// 帧率 = 呈现计数差值 / 采样间隔（引擎不依赖平台时钟，wasm 无 Instant）
+let fpsLastCount = 0;
+let fpsLastTime = performance.now();
+let fpsSmoothed = 0;
+function refreshFpsBox() {
+  if (!fpsOn) {
+    fpsBox.textContent = "FPS 关";
+    return;
+  }
+  const now = performance.now();
+  const c = app.render_count();
+  const dt = (now - fpsLastTime) / 1000;
+  if (dt > 0.2) {
+    const inst = (c - fpsLastCount) / dt;
+    fpsSmoothed = fpsSmoothed === 0 ? inst : fpsSmoothed * 0.6 + inst * 0.4;
+    fpsLastCount = c;
+    fpsLastTime = now;
+  }
+  fpsBox.textContent = `FPS ${fpsSmoothed.toFixed(1)}`;
+}
+fpsBox.onclick = () => {
+  fpsOn = !fpsOn;
+  localStorage.setItem("pe_fps_monitor", fpsOn ? "1" : "0");
+  app.set_fps_monitor(fpsOn);
+  if (fpsOn) { fpsLastCount = 0; fpsLastTime = performance.now(); fpsSmoothed = 0; }
+  refreshFpsBox();
+};
+setInterval(refreshFpsBox, 500);
+refreshFpsBox();

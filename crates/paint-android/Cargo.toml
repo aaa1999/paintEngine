@@ -8,6 +8,8 @@ edition.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-paint-core = { path = "../paint-core", default-features = false }
+log = { workspace = true }
+# text(swash 文字光栅化) + svg(resvg 导入) 供文字工具与 SVG 附件使用
+paint-core = { path = "../paint-core", default-features = false, features = ["text", "svg"] }
 paint-render = { path = "../paint-render" }
 jni = "0.21"

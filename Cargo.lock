@@ -2092,6 +2092,7 @@ name = "paint-android"
 version = "0.1.0"
 dependencies = [
  "jni 0.21.1",
+ "log",
  "paint-core",
  "paint-render",
 ]
@@ -2103,6 +2104,7 @@ dependencies = [
  "image-webp",
  "jpeg-decoder",
  "jpeg-encoder",
+ "log",
  "png 0.17.16",
  "resvg",
  "roxmltree",
@@ -2115,6 +2117,7 @@ name = "paint-desktop"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "log",
  "paint-core",
  "paint-gpu",
  "paint-render",
@@ -2147,6 +2150,7 @@ name = "paint-wasm"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "log",
  "paint-core",
  "paint-gpu",
  "paint-render",

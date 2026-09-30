@@ -1,4 +1,5 @@
 use crate::tile::TileGrid;
+use crate::Color;
 
 /// 图层句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -207,6 +208,53 @@ impl BlendMode {
     }
 }
 
+/// 矢量对象：源数据持久保存于图层，合成时光栅化（`obj_tiles` 缓存）。
+/// 非破坏——可重新编辑（改文字/移动/删除），编辑 = 重建缓存而非改像素。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrawObject {
+    /// 文字。`bbox` 命中测试用；`raster` 为光栅缓存（Web 壳层渲染
+    /// 的文字无引擎字体，必须随对象携带才能在撤销/载入后重现）。
+    Text {
+        pos: (f64, f64),
+        text: String,
+        size: f32,
+        color: Color,
+        raster: Option<std::sync::Arc<TextRaster>>,
+        bbox: Option<crate::geometry::Rect>,
+    },
+    /// 几何形状（枚举就位；绘制 UI 后续接入）。
+    Shape {
+        kind: crate::shape::ShapeKind,
+        a: (f64, f64),
+        b: (f64, f64),
+        fill: bool,
+        color: Color,
+        width: f32,
+        bbox: Option<crate::geometry::Rect>,
+    },
+}
+
+/// 文字对象的光栅缓存：预乘 RGBA + 相对 `pos` 的偏移。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRaster {
+    pub premul: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+    /// 光栅左上角相对对象 `pos` 的偏移（画布像素）。
+    pub dx: i64,
+    pub dy: i64,
+}
+
+impl DrawObject {
+    /// 命中测试包围盒（未光栅化过 = 无 bbox = 不命中）。
+    pub fn bbox(&self) -> Option<crate::geometry::Rect> {
+        match self {
+            DrawObject::Text { bbox, .. } => *bbox,
+            DrawObject::Shape { bbox, .. } => *bbox,
+        }
+    }
+}
+
 /// 单个图层：稀疏瓦片网格 + 属性。
 #[derive(Clone)]
 pub struct Layer {
@@ -219,10 +267,19 @@ pub struct Layer {
     pub mask: Option<TileGrid>,
     /// 剪贴层：本层有效 alpha 受下方第一个非剪贴层的像素 alpha 约束。
     pub clipped: bool,
-    /// 图层组标签（同名层属于同组，UI 折叠显示/批量操作）。
+    /// 图层组标签（同名层属于同组，UI 折叠显示）。
     pub group: Option<String>,
     /// 非破坏性调整（合成时应用，不改像素）。
     pub adjustment: Option<LayerAdjustment>,
+    /// 矢量对象列表（空 = 纯栅格层，行为与历史版本一致）。
+    pub objects: Vec<DrawObject>,
+    /// 对象光栅化缓存（对象编辑时整体重建）。
+    pub obj_tiles: TileGrid,
+    /// 对象缓存待重建（引擎持渲染器侧执行；撤销/重做/载入后置位）。
+    pub obj_stale: bool,
+    /// 合成内容缓存：tiles + obj_tiles 预乘 over 合并（对象在栅格之上）。
+    /// 增量维护——与 tiles Arc 共享，无对象重叠的瓦片零拷贝。
+    pub merged: TileGrid,
 }
 
 impl Layer {
@@ -238,7 +295,100 @@ impl Layer {
             clipped: false,
             group: None,
             adjustment: None,
+            objects: Vec::new(),
+            obj_tiles: TileGrid::new(),
+            obj_stale: false,
+            merged: TileGrid::new(),
         }
+    }
+
+    /// 合成内容：无对象 = 原始瓦片；有对象 = 合并缓存。
+    /// 合成器（CPU/GPU）统一从此读取，两端零感知。
+    pub fn content(&self) -> &TileGrid {
+        if self.objects.is_empty() {
+            &self.tiles
+        } else {
+            &self.merged
+        }
+    }
+
+    /// 单瓦片重合并：merged[tid] = tiles[tid] 被 obj_tiles[tid] 覆盖。
+    /// 无对象瓦片重叠时与 tiles Arc 共享（零拷贝）。
+    fn merge_tile(&mut self, tid: crate::tile::TileId) {
+        use std::sync::Arc;
+        match self.obj_tiles.get(tid) {
+            None => {
+                // 无对象覆盖：直接共享基础瓦片
+                match self.tiles.get(tid) {
+                    Some(t) => self.merged.set(tid, Arc::clone(t)),
+                    None => {
+                        self.merged.remove(tid);
+                    }
+                }
+            }
+            Some(ot) => {
+                let mut px = match self.tiles.get(tid) {
+                    Some(t) => (**t).clone(),
+                    None => crate::tile::TileData::transparent(),
+                };
+                over_pixels(px.pixels_mut(), ot.pixels());
+                self.merged.set(tid, Arc::new(px));
+            }
+        }
+    }
+
+    /// 基础瓦片在 `ids` 内变化后同步合并缓存（笔画/填充/撤销等写路径调用）。
+    pub fn sync_tiles(&mut self, ids: impl Iterator<Item = crate::tile::TileId>) {
+        if self.objects.is_empty() {
+            return;
+        }
+        for tid in ids {
+            self.merge_tile(tid);
+        }
+    }
+
+    /// 对象列表变化后：置缓存待重建标记 + 清空合并缓存
+    /// （重建在引擎侧 rasterize_objects 完成后回调 sync_all）。
+    pub fn objects_edited(&mut self) {
+        if !self.objects.is_empty() || !self.obj_tiles.is_empty() {
+            self.obj_stale = true;
+        }
+    }
+
+    /// 对象缓存重建完成：全量同步合并缓存。
+    pub fn sync_all_objects(&mut self) {
+        self.obj_stale = false;
+        if self.objects.is_empty() {
+            self.merged = self.tiles.clone();
+            return;
+        }
+        // 覆盖 obj_tiles ∪ 旧 merged 中对象涉及的瓦片
+        let ids: Vec<crate::tile::TileId> = self
+            .obj_tiles
+            .ids()
+            .chain(self.merged.ids())
+            .collect();
+        for tid in ids {
+            self.merge_tile(tid);
+        }
+    }
+}
+
+/// 预乘 over：dst = src over dst（逐像素，256×256 瓦片内联热路径）。
+pub(crate) fn over_pixels(dst: &mut [u8], src: &[u8]) {
+    for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+        let sa = s[3] as u32;
+        if sa == 0 {
+            continue;
+        }
+        if sa == 255 {
+            d.copy_from_slice(s);
+            continue;
+        }
+        for k in 0..3 {
+            d[k] = (s[k] as u32 + d[k] as u32 * (255 - sa) / 255) as u8;
+        }
+        d[3] = (sa + d[3] as u32 * (255 - sa) / 255) as u8;
     }
 }
 

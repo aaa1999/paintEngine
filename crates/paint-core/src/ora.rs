@@ -59,13 +59,16 @@ pub struct OraDoc {
     pub h: u32,
     /// 与 stack.xml 相同顺序：首个元素为最顶层
     pub layers: Vec<OraLayer>,
+    /// paintengine/objects.txt：(自底向上层索引, 对象列表)
+    pub objects: Vec<(usize, Vec<crate::layer::DrawObject>)>,
 }
 
 /// 图层 1:1 拷贝到 RGBA 预乘缓冲（bounds 为画布像素矩形）。
+/// 读 content()（对象层 = tiles+对象合并缓存）。
 fn layer_to_rgba(layer: &Layer, bounds: Rect, canvas: (u32, u32)) -> Vec<u8> {
     let (cw, ch) = canvas;
     let mut buf = vec![0u8; (cw as usize) * (ch as usize) * 4];
-    for (tid, tile) in layer.tiles.iter_entries() {
+    for (tid, tile) in layer.content().iter_entries() {
         let (ox, oy) = (tid.origin().0, tid.origin().1);
         for ty in 0..TILE as i64 {
             let gy = oy + ty;
@@ -134,7 +137,7 @@ pub fn encode_ora(
     // 画布 = 全部图层内容包围盒（无内容时 1×1）
     let mut bounds: Option<Rect> = None;
     for l in doc.layers().iter() {
-        if let Some(b) = l.tiles.content_bounds_precise() {
+        if let Some(b) = l.content().content_bounds_precise() {
             bounds = Some(match bounds {
                 Some(a) => a.union(&b),
                 None => b,
@@ -205,8 +208,166 @@ pub fn encode_ora(
         zip.write_all(t).map_err(|e| e.to_string())?;
     }
 
+    // paintengine/objects.txt：矢量对象（私有条目，其他 ORA 读端忽略）。
+    // 逐层块：`L <自底向上索引>` + 对象行。
+    // 对象行：T x y size r g b dx dy <hex(premul PNG)> <percent 编码文本>
+    let objs_txt = encode_objects_txt(&layers);
+    if !objs_txt.is_empty() {
+        zip.start_file("paintengine/objects.txt", deflated)
+            .map_err(|e| e.to_string())?;
+        zip.write_all(objs_txt.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
     let cursor = zip.finish().map_err(|e| e.to_string())?;
     Ok(cursor.into_inner())
+}
+
+/// 对象条目序列化（无对象层不产生块）。
+fn encode_objects_txt(layers: &[(crate::layer::LayerId, &Layer)]) -> String {
+    let mut out = String::new();
+    for (i, (_, layer)) in layers.iter().enumerate() {
+        if layer.objects.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("L {i}\n"));
+        for obj in &layer.objects {
+            if let crate::layer::DrawObject::Text {
+                pos,
+                text,
+                size,
+                color,
+                raster,
+                ..
+            } = obj
+            {
+                let mut fields = format!(
+                    "T {} {} {} {} {} {}",
+                    pos.0, pos.1, size, color.r, color.g, color.b
+                );
+                if let Some(ra) = raster {
+                    // 光栅（预乘）→ PNG → hex
+                    if let Ok(png) = crate::io::encode_png(&ra.premul, ra.w, ra.h) {
+                        fields.push_str(&format!(" {} {}", ra.dx, ra.dy));
+                        fields.push_str(&format!(" {}", hex_encode(&png)));
+                    } else {
+                        fields.push_str(" 0 0 -");
+                    }
+                } else {
+                    fields.push_str(" 0 0 -");
+                }
+                fields.push_str(&format!(" {}\n", percent_encode(text)));
+                out.push_str(&fields);
+            }
+        }
+    }
+    out
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let b = s.as_bytes();
+    for i in (0..b.len()).step_by(2) {
+        let hi = (b[i] as char).to_digit(16)?;
+        let lo = (b[i + 1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
+fn percent_encode(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('\n', "%0A")
+        .replace('\r', "%0D")
+}
+
+fn percent_decode(s: &str) -> String {
+    // 按字节处理（%XX 解码 + 原样 UTF-8 字节），最后整体转回字符串
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// 解析 objects.txt → (自底向上层索引, 对象列表)。
+pub fn parse_objects_txt(txt: &str) -> Vec<(usize, Vec<crate::layer::DrawObject>)> {
+    let mut out: Vec<(usize, Vec<crate::layer::DrawObject>)> = Vec::new();
+    for line in txt.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        match t.first() {
+            Some(&"L") => {
+                if let Ok(i) = t.get(1).unwrap_or(&"").parse::<usize>() {
+                    out.push((i, Vec::new()));
+                }
+            }
+            Some(&"T") => {
+                let Some(cur) = out.last_mut() else { continue };
+                let (Some(x), Some(y), Some(size), Some(r), Some(g), Some(b)) = (
+                    t.get(1).and_then(|v| v.parse::<f64>().ok()),
+                    t.get(2).and_then(|v| v.parse::<f64>().ok()),
+                    t.get(3).and_then(|v| v.parse::<f32>().ok()),
+                    t.get(4).and_then(|v| v.parse::<u8>().ok()),
+                    t.get(5).and_then(|v| v.parse::<u8>().ok()),
+                    t.get(6).and_then(|v| v.parse::<u8>().ok()),
+                ) else {
+                    continue;
+                };
+                let mut raster = None;
+                if let (Some(dx), Some(dy), Some(hex)) = (
+                    t.get(7).and_then(|v| v.parse::<i64>().ok()),
+                    t.get(8).and_then(|v| v.parse::<i64>().ok()),
+                    t.get(9).filter(|v| **v != "-"),
+                ) {
+                    if let Some(png) = hex_decode(hex) {
+                        if let Ok((premul, w, h)) = crate::io::decode_png(&png) {
+                            raster = Some(crate::layer::TextRaster {
+                                premul,
+                                w,
+                                h,
+                                dx,
+                                dy,
+                            });
+                        }
+                    }
+                }
+                let text = percent_decode(t.get(10).unwrap_or(&""));
+                cur.1.push(crate::layer::DrawObject::Text {
+                    pos: (x, y),
+                    text,
+                    size,
+                    color: crate::Color { r, g, b },
+                    raster: raster.map(std::sync::Arc::new),
+                    bbox: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// 解码 .ora。
@@ -272,7 +433,15 @@ pub fn decode_ora(bytes: &[u8]) -> Result<OraDoc, String> {
     if layers.is_empty() {
         return Err("ORA 中没有图层".into());
     }
-    Ok(OraDoc { w, h, layers })
+    // 私有对象条目（可选）
+    let mut objects = Vec::new();
+    if let Ok(mut f) = zip.by_name("paintengine/objects.txt") {
+        let mut txt = String::new();
+        if f.read_to_string(&mut txt).is_ok() {
+            objects = parse_objects_txt(&txt);
+        }
+    }
+    Ok(OraDoc { w, h, layers, objects })
 }
 
 /// 从 OraDoc 构建图层栈（自底向上插入）。
@@ -293,6 +462,13 @@ pub fn layers_from_ora(ora: &OraDoc) -> Vec<Layer> {
             layer.tiles = grid;
         }
         out.push(layer);
+    }
+    // 矢量对象按层索引挂载（索引对齐自底向上的 out 顺序）
+    for (idx, objs) in &ora.objects {
+        if let Some(l) = out.get_mut(*idx) {
+            l.objects = objs.clone();
+            l.obj_stale = true; // 载入后重建光栅化缓存（render 前）
+        }
     }
     out
 }

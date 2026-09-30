@@ -152,18 +152,50 @@ pub enum SelectionOp {
 }
 
 /// 当前工具。橡皮 = 同一 RoundBrush 引擎、dst-out 合成；
-/// 蒙版编辑 = 盖章目标切到活动图层的蒙版网格（白=显现）。
+/// 蒙版编辑 = 盖章目标切到活动图层的蒙版网格（白=显现）；
+/// 形状 = 拖拽定义几何（描边复用笔刷参数，引擎内状态机 + 帧级预览）；
+/// 文字 = 点击落锚点，壳层取锚点（[`Engine::take_text_anchor`]）弹输入；
+/// 填充 = 点击处连通区域填笔刷色（油漆桶）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
     Brush,
     Eraser,
     Mask,
+    Shape {
+        kind: crate::shape::ShapeKind,
+        fill: bool,
+    },
+    Text,
+    Fill {
+        /// 各通道容差 0-255。
+        tolerance: u8,
+    },
 }
 
 struct ActiveStroke {
     state: StrokeState,
     recorder: StrokeRecorder,
     layer: LayerId,
+    pointer: u64,
+}
+
+/// 进行中的形状拖拽（画布坐标）。预览走帧缓冲叠加，提交才落瓦片。
+#[derive(Clone, Copy)]
+struct ActiveShape {
+    kind: crate::shape::ShapeKind,
+    fill: bool,
+    anchor: (f64, f64),
+    current: (f64, f64),
+    layer: LayerId,
+    pointer: u64,
+}
+
+/// 进行中的对象拖拽移动。
+#[derive(Clone, Copy)]
+struct ObjectMoving {
+    layer: LayerId,
+    index: usize,
+    last: (f64, f64),
     pointer: u64,
 }
 
@@ -182,6 +214,27 @@ pub struct Engine {
     brush: RoundBrush,
     tool: Tool,
     stroke: Option<ActiveStroke>,
+    /// 进行中的形状拖拽（形状工具）。
+    shape_drag: Option<ActiveShape>,
+    /// 文字工具的落点（画布坐标），壳层 take 后弹输入框。
+    text_anchor: Option<(f64, f64)>,
+    /// 文字工具命中的已有对象（编辑目标），壳层 take 后弹编辑框。
+    text_editing: Option<(LayerId, usize)>,
+    /// 最近命中的文字对象（update/delete 的目标；下次命中覆盖）。
+    last_text_target: Option<(LayerId, usize)>,
+    /// 文字对象拖拽移动（文字工具下按住对象拖动）。
+    object_moving: Option<ObjectMoving>,
+    /// 移动开始时的对象列表快照（撤销用）。
+    obj_drag_before: Option<(LayerId, Vec<crate::layer::DrawObject>)>,
+    /// 文字字体字节（swash 光栅化；壳层启动时设置。Web 壳层用
+    /// 浏览器渲染走 raster 通道，可不设）。
+    text_font: Option<std::sync::Arc<Vec<u8>>>,
+    /// 帧率监控开关（EngineConfig.fps_monitor，默认开）。
+    fps_monitor: bool,
+    /// 呈现帧计数（render 计数；监控关闭时冻结）。
+    /// 壳层用自己的时钟两次采样差值即得帧率——引擎不依赖平台时钟
+    ///（std Instant 在 wasm32 上不可用）。
+    presents: u64,
     pen_in_range: bool,
     vp_rev: u64,
     // 触摸多指状态
@@ -224,6 +277,15 @@ impl Engine {
             brush: config.brush,
             tool: Tool::Brush,
             stroke: None,
+            shape_drag: None,
+            text_anchor: None,
+            text_editing: None,
+            last_text_target: None,
+            object_moving: None,
+            obj_drag_before: None,
+            text_font: None,
+            fps_monitor: config.fps_monitor,
+            presents: 0,
             pen_in_range: false,
             vp_rev: 0,
             touches: HashMap::new(),
@@ -429,6 +491,7 @@ impl Engine {
 
     /// 对活动图层（或选区内）应用滤镜。入撤销历史。
     pub fn apply_filter(&mut self, filter: crate::filter::Filter) -> bool {
+        log::info!("[filter] 应用滤镜 {filter:?}");
         if self.transforming() {
             return false;
         }
@@ -493,8 +556,14 @@ impl Engine {
         self.tool
     }
 
-    /// 切换工具（画笔/橡皮/蒙版编辑）。
+    /// 切换工具（画笔/橡皮/蒙版编辑/形状/文字）。
+    /// 拖拽中切换 = 放弃当前形状预览。
     pub fn set_tool(&mut self, tool: Tool) {
+        if tool != self.tool {
+            log::info!("[tool] 切换工具: {:?} → {:?}", self.tool, tool);
+            self.cancel_shape();
+            self.text_anchor = None;
+        }
         self.tool = tool;
     }
 
@@ -503,6 +572,7 @@ impl Engine {
     /// 换出当前文档（保留在调用方），换入另一个。
     /// 撤销历史/图层/选区/浮动层都在 Document 内——切换零丢失。
     pub fn swap_document(&mut self, doc: Document) -> Document {
+        log::info!("[doc] 切换文档");
         self.end_stroke();
         let old = std::mem::replace(&mut self.doc, doc);
         self.dirty = Dirty::All;
@@ -516,6 +586,7 @@ impl Engine {
 
     /// 新建空文档（一个默认图层）。
     pub fn new_document(&mut self) {
+        log::info!("[doc] 新建文档");
         self.end_stroke();
         self.doc = Document::new(256 * 1024 * 1024);
         self.dirty = Dirty::All;
@@ -524,6 +595,30 @@ impl Engine {
     /// 当前文档的可变引用（壳层多文档管理器直接操作用）。
     pub fn document_take(&mut self) -> Document {
         std::mem::replace(&mut self.doc, Document::new(1))
+    }
+
+    /// 编辑计数（commit/undo/redo 各 +1）——壳层自动保存脏检查：
+    /// 记录上次保存时的值，与当前值不同即有未保存修改。
+    pub fn edit_count(&self) -> u64 {
+        self.doc.edit_count()
+    }
+
+    /// 呈现帧计数（单调递增；监控关闭时冻结）。
+    /// 壳层两次采样 + 本地时钟差值 = 帧率：
+    /// `fps = (c1 - c0) / (t1 - t0)`。事件驱动架构下空闲时段
+    /// 增量为 0——这正是"按需重绘零开销"的直接度量。
+    pub fn render_count(&self) -> u64 {
+        self.presents
+    }
+
+    /// 帧率监控开关（运行时切换）。
+    pub fn set_fps_monitor(&mut self, on: bool) {
+        self.fps_monitor = on;
+    }
+
+    /// 监控当前是否开启。
+    pub fn fps_monitor_enabled(&self) -> bool {
+        self.fps_monitor
     }
 
     /// 合成帧缓冲的可变访问（呈现前叠加 UI 用）。
@@ -614,6 +709,7 @@ impl Engine {
 
     /// 新建图层（入撤销）。
     pub fn add_layer(&mut self) -> Option<LayerId> {
+        log::info!("[layer] 新建图层");
         let r = self.doc.add_layer(None);
         if r.is_some() {
             self.dirty = Dirty::All;
@@ -652,6 +748,7 @@ impl Engine {
 
     /// 复制选中内容（无选区=整层内容）到内部剪贴板。返回是否有内容。
     pub fn copy_selection(&mut self) -> bool {
+        log::info!("[clipboard] 复制选区");
         if self.transforming() {
             return false;
         }
@@ -666,6 +763,7 @@ impl Engine {
 
     /// 剪切：复制 + 清除原内容（整组入撤销）。
     pub fn cut_selection(&mut self) -> bool {
+        log::info!("[clipboard] 剪切选区");
         if !self.copy_selection() {
             return false;
         }
@@ -760,6 +858,7 @@ impl Engine {
 
     /// 粘贴直行 RGBA（系统剪贴板常见形态）：先预乘再入浮动。
     pub fn paste_rgba_float(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
+        log::info!("[clipboard] 粘贴浮动 {w}×{h}");
         if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
             return false;
         }
@@ -771,6 +870,179 @@ impl Engine {
             }
         }
         self.paste_premul_float(&premul, w, h)
+    }
+
+    /// 油漆桶：以点击处活动层像素为基准色的连通区域填充（笔刷色不透明）。
+    /// `tolerance` 为各通道容差（0-255）。填充范围限制在图层内容包围盒
+    /// 与点击点周围 8192px 的交集——无限画布上空区域不发散。选区
+    /// 存在时作为屏障裁剪扩散。整组入撤销。
+    pub fn flood_fill(&mut self, x: i64, y: i64, tolerance: u8) -> bool {
+        let layer = self.doc.active_layer();
+        // 采样阶段（只读借用）
+        let (region, target, selection) = {
+            let l = self.doc.layers().get(layer);
+            let Some(bounds) = l.tiles.content_bounds_precise() else {
+                return false; // 空层无处可填
+            };
+            // 点击点周围 8192px 上限框
+            let cap = 8192i64;
+            let cbox = Rect::new(
+                (x - cap) as i32,
+                (y - cap) as i32,
+                (cap * 2) as u32,
+                (cap * 2) as u32,
+            );
+            let Some(r) = bounds.intersect(&cbox) else {
+                return false;
+            };
+            let t = layer_px(&l.tiles, x, y);
+            (r, t, self.doc.selection().cloned())
+        };
+        if region.w == 0 || region.h == 0 {
+            return false;
+        }
+        let (rx, ry, rw, rh) = (
+            region.x as i64,
+            region.y as i64,
+            region.w as i64,
+            region.h as i64,
+        );
+        // 访问位图（region 局部坐标）
+        let mut visited = vec![0u8; (rw * rh) as usize];
+        let idx = |px: i64, py: i64| ((py - ry) * rw + (px - rx)) as usize;
+        let inside = |px: i64, py: i64| px >= rx && px < rx + rw && py >= ry && py < ry + rh;
+        let sel_ok = |sel: &Option<TileGrid>, px: i64, py: i64| match sel {
+            None => true,
+            Some(s) => layer_px(s, px, py)[0] > 0,
+        };
+        let matches = |p: [u8; 4], tol: u8| {
+            (p[0] as i16 - target[0] as i16).unsigned_abs() <= tol as u16
+                && (p[1] as i16 - target[1] as i16).unsigned_abs() <= tol as u16
+                && (p[2] as i16 - target[2] as i16).unsigned_abs() <= tol as u16
+                && (p[3] as i16 - target[3] as i16).unsigned_abs() <= tol as u16
+        };
+
+        let color = self.brush.color;
+        let fill_px = [color.r, color.g, color.b, 255];
+        let tol = tolerance;
+        let mut stack: Vec<(i64, i64)> = vec![(x, y)];
+        let mut touched: Vec<TileId> = Vec::new();
+        let mut recorder = StrokeRecorder::new(layer);
+        let mut filled_any = false;
+
+        // 写入阶段（可变借用，逐像素入格）
+        let l = self.doc.layers_mut().get_mut(layer);
+        while let Some((sx, sy)) = stack.pop() {
+            if !inside(sx, sy) || visited[idx(sx, sy)] != 0 {
+                continue;
+            }
+            // 向上找到区间起点
+            let mut y0 = sy;
+            while y0 > ry
+                && visited[idx(sx, y0 - 1)] == 0
+                && matches(layer_px(&l.tiles, sx, y0 - 1), tol)
+                && sel_ok(&selection, sx, y0 - 1)
+            {
+                y0 -= 1;
+            }
+            // 向下扫描填充
+            let mut cy = y0;
+            let mut span_left = false;
+            let mut span_right = false;
+            while cy < ry + rh
+                && matches(layer_px(&l.tiles, sx, cy), tol)
+                && sel_ok(&selection, sx, cy)
+            {
+                let tid = TileId::at(sx, cy);
+                if !touched.contains(&tid) {
+                    recorder.capture(&l.tiles, tid);
+                    touched.push(tid);
+                }
+                let t = l.tiles.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((cy - oy) * 256 + (sx - ox)) * 4) as usize;
+                if i + 3 < t.pixels_mut().len() {
+                    t.pixels_mut()[i..i + 4].copy_from_slice(&fill_px);
+                    filled_any = true;
+                }
+                visited[idx(sx, cy)] = 1;
+                // 左右邻居入栈（扫描线优化：只在 span 边界入栈）
+                if inside(sx - 1, cy) && visited[idx(sx - 1, cy)] == 0 {
+                    if !span_left && matches(layer_px(&l.tiles, sx - 1, cy), tol) {
+                        stack.push((sx - 1, cy));
+                        span_left = true;
+                    } else if span_left && !matches(layer_px(&l.tiles, sx - 1, cy), tol) {
+                        span_left = false;
+                    }
+                }
+                if inside(sx + 1, cy) && visited[idx(sx + 1, cy)] == 0 {
+                    if !span_right && matches(layer_px(&l.tiles, sx + 1, cy), tol) {
+                        stack.push((sx + 1, cy));
+                        span_right = true;
+                    } else if span_right && !matches(layer_px(&l.tiles, sx + 1, cy), tol) {
+                        span_right = false;
+                    }
+                }
+                cy += 1;
+            }
+        }
+        if !filled_any {
+            log::info!("[fill] 油漆桶 ({x},{y}) tol={tolerance}: 无可填区域");
+            return false;
+        }
+        let n = touched.len();
+        self.doc.commit(recorder.finish("Fill"));
+        log::info!("[fill] 油漆桶 ({x},{y}) tol={tolerance}: 填充 {n} 瓦片");
+        self.dirty = Dirty::All;
+        true
+    }
+
+    /// 直行 RGBA 直接盖到活动图层指定画布位置（alpha over，入撤销）。
+    /// 壳层自渲染内容（Web 浏览器字体文字、贴纸等）的落墨通道；
+    /// `x, y` 为目标左上角画布坐标。
+    pub fn paste_rgba_at(&mut self, rgba: &[u8], w: u32, h: u32, x: i64, y: i64) -> bool {
+        log::info!("[paste] RGBA 落墨 {w}×{h} at ({x},{y})");
+        if w == 0 || h == 0 || rgba.len() < (w as usize) * (h as usize) * 4 {
+            return false;
+        }
+        let Some(layer) = self.doc.layers().try_active() else {
+            return false;
+        };
+        let mut recorder = StrokeRecorder::new(layer);
+        let l = self.doc.layers_mut().get_mut(layer);
+        for gy in 0..h as i64 {
+            for gx in 0..w as i64 {
+                let src = ((gy * w as i64 + gx) * 4) as usize;
+                let a = rgba[src + 3];
+                if a == 0 {
+                    continue;
+                }
+                let (px, py) = (x + gx, y + gy);
+                let tid = TileId::at(px, py);
+                recorder.capture(&l.tiles, tid);
+                let t = l.tiles.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((py - oy) * 256 + (px - ox)) * 4) as usize;
+                if i + 3 >= t.pixels_mut().len() {
+                    continue;
+                }
+                // 直行 → 预乘源
+                let sa = a as u32;
+                let sr = [rgba[src] as u32 * sa / 255, rgba[src + 1] as u32 * sa / 255, rgba[src + 2] as u32 * sa / 255];
+                let p = &mut t.pixels_mut()[i..i + 4];
+                let da = p[3] as u32;
+                for k in 0..3 {
+                    p[k] = (sr[k] + p[k] as u32 * (255 - sa) / 255) as u8;
+                }
+                p[3] = (sa + da * (255 - sa) / 255) as u8;
+            }
+        }
+        let group = recorder.finish("Paste");
+        if !group.tile_ids().is_empty() {
+            self.doc.commit(group);
+            self.dirty = Dirty::All;
+        }
+        true
     }
 
     fn paste_premul_float(&mut self, rgba: &[u8], w: u32, h: u32) -> bool {
@@ -860,7 +1132,7 @@ impl Engine {
         let layer = self.doc.layers().try_active()?;
         match self.doc.selection() {
             Some(g) => g.content_bounds(),
-            None => self.doc.layers().get(layer).tiles.content_bounds_precise(),
+            None => self.doc.layers().get(layer).content().content_bounds_precise(),
         }
     }
 
@@ -916,6 +1188,7 @@ impl Engine {
     /// 开始变换：提升选中内容（无选区则整层内容）为浮动层。
     /// 进行中忽略笔画与撤销；提交/取消后恢复。
     pub fn begin_transform(&mut self) -> bool {
+        log::info!("[transform] 开始内容变换");
         if self.transforming() {
             return false;
         }
@@ -1031,6 +1304,7 @@ impl Engine {
 
     /// 提交：按累积仿射盖章回图层（整组入撤销）。
     pub fn commit_transform(&mut self) -> bool {
+        log::info!("[transform] 提交变换");
         let Some(fl) = self.doc.floating().cloned() else {
             return false;
         };
@@ -1108,6 +1382,7 @@ impl Engine {
 
     /// 取消：浮动内容按恒等仿射放回原位（内容零变化，不入撤销）。
     pub fn cancel_transform(&mut self) -> bool {
+        log::info!("[transform] 取消变换");
         let Some(fl) = self.doc.floating().cloned() else {
             return false;
         };
@@ -1506,6 +1781,7 @@ impl Engine {
 
     /// 活动图层向下合并。底层无下层时失败。
     pub fn merge_down(&mut self) -> bool {
+        log::info!("[layer] 向下合并");
         let Some(active) = self.doc.layers().try_active() else {
             return false;
         };
@@ -1549,6 +1825,7 @@ impl Engine {
 
     /// 全部可见图层压平为单层。
     pub fn flatten(&mut self) -> bool {
+        log::info!("[layer] 压平");
         if self.doc.layers().len() <= 1 {
             return false;
         }
@@ -1676,6 +1953,7 @@ impl Engine {
 
     /// 导入图像（自动识别 PNG/JPEG/WebP）→ 瓦片 → 新图层。
     pub fn import_image(&mut self, bytes: &[u8]) -> Option<u64> {
+        log::info!("[io] 导入图像 {} 字节", bytes.len());
         let (premul, w, h) = crate::io::decode_auto(bytes).ok()?;
         self.insert_pixels_as_layer(&premul, w, h)
     }
@@ -1697,6 +1975,7 @@ impl Engine {
     /// `scale` 控制渲染分辨率（1.0 = SVG 原始尺寸）。
     #[cfg(feature = "svg")]
     pub fn import_svg(&mut self, svg: &[u8], scale: f32) -> Option<u64> {
+        log::info!("[io] 导入 SVG {} 字节 scale={scale}", svg.len());
         let scale = scale.max(0.01);
         let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).ok()?;
         let size = tree.size();
@@ -1749,16 +2028,33 @@ impl Engine {
 
     /// 保存为 .ora（含合成图与缩略图）。
     pub fn save_ora(&mut self) -> Option<Vec<u8>> {
+        let t0 = std::time::Instant::now();
         let merged = self.export_png(None, 1.0, true)?;
         let b = self.visible_content_bounds()?;
         let scale = (256.0 / b.w as f64).min(256.0 / b.h as f64).min(1.0) as f32;
         let thumb = self.export_png(Some(b), scale, true)?;
-        crate::ora::encode_ora(&self.doc, Some(&merged), Some(&thumb)).ok()
+        match crate::ora::encode_ora(&self.doc, Some(&merged), Some(&thumb)) {
+            Ok(bytes) => {
+                log::info!(
+                    "[io] 存档 ORA {} 字节（{:.1}ms，edit_count={}）",
+                    bytes.len(),
+                    t0.elapsed().as_secs_f64() * 1000.0,
+                    self.doc.edit_count()
+                );
+                Some(bytes)
+            }
+            Err(e) => {
+                log::warn!("[io] 存档 ORA 失败: {e}");
+                None
+            }
+        }
     }
 
     /// 载入 .ora 替换当前文档（历史重置）。
     pub fn load_ora(&mut self, bytes: &[u8]) -> bool {
+        let t0 = std::time::Instant::now();
         let Ok(ora) = crate::ora::decode_ora(bytes) else {
+            log::warn!("[io] 载入 ORA 失败（{} 字节，解码错误）", bytes.len());
             return false;
         };
         let layers = crate::ora::layers_from_ora(&ora);
@@ -1773,6 +2069,12 @@ impl Engine {
             stack.set_active(*top);
         }
         self.doc = Document::with_layers(stack);
+        log::info!(
+            "[io] 载入 ORA {} 字节 → {} 层（{:.1}ms）",
+            bytes.len(),
+            ids.len(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
         self.dirty = Dirty::All;
         true
     }
@@ -1823,7 +2125,7 @@ impl Engine {
     pub fn visible_content_bounds(&self) -> Option<Rect> {
         let mut acc: Option<Rect> = None;
         for l in self.doc.layers().iter().filter(|l| l.visible) {
-            if let Some(b) = l.tiles.content_bounds_precise() {
+            if let Some(b) = l.content().content_bounds_precise() {
                 acc = Some(match acc {
                     Some(a) => a.union(&b),
                     None => b,
@@ -1839,6 +2141,7 @@ impl Engine {
     pub fn handle_event(&mut self, ev: PlatformEvent) {
         match ev {
             PlatformEvent::Resize { w, h, .. } => {
+                log::debug!("[viewport] 尺寸 {w}×{h}");
                 self.size = (w, h);
                 self.frame = vec![0; (w as usize) * (h as usize) * 4];
                 self.dirty = Dirty::All;
@@ -1846,8 +2149,13 @@ impl Engine {
             PlatformEvent::PenInRange(v) => self.pen_in_range = v,
             PlatformEvent::Focus(f) => {
                 if !f {
-                    // 失焦：按抬笔处理，保留已画内容与撤销记录
+                    // 失焦：按抬笔处理，保留已画内容与撤销记录；
+                    // 形状拖拽/对象拖拽放弃（未提交本就无历史）
                     self.end_stroke();
+                    self.cancel_shape();
+                    self.cancel_object_move();
+                    self.text_anchor = None;
+                    self.text_editing = None;
                     self.gesture = None;
                     self.gesture_latch = false;
                 }
@@ -1858,9 +2166,14 @@ impl Engine {
 
     /// 合成并呈现。Clean 时跳过合成仅重新呈现（窗口恢复等场景）。
     pub fn render(&mut self, surface: &mut dyn Surface) {
+        // 撤销/重做/载入后的对象缓存重建（置位 stale 的层）
+        self.refresh_stale_objects();
         let (w, h) = self.size;
         if w == 0 || h == 0 {
             return;
+        }
+        if self.fps_monitor {
+            self.presents += 1;
         }
         // 视口被外部（壳层手势等）修改：全量重绘
         let vp_rev = self.doc.viewport().revision();
@@ -1889,29 +2202,97 @@ impl Engine {
         let bg = self.doc.background();
         self.renderer
             .composite(&self.doc, &mut self.frame, w, region, Some(bg));
+        // 形状拖拽预览：合成后叠加到帧（不落瓦片、不入撤销）
+        if let Some(sh) = self.shape_drag {
+            let vp = self.doc.viewport().clone();
+            let (color, alpha) = (self.brush.color, self.brush.opacity);
+            let (radius, hardness) = (self.brush.size / 2.0, self.brush.hardness);
+            if sh.fill && sh.kind != crate::shape::ShapeKind::Line {
+                // 填充预览：屏幕空间直接填充
+                let (x0, y0) = vp.canvas_to_screen(
+                    sh.anchor.0.min(sh.current.0),
+                    sh.anchor.1.min(sh.current.1),
+                );
+                let (x1, y1) = vp.canvas_to_screen(
+                    sh.anchor.0.max(sh.current.0),
+                    sh.anchor.1.max(sh.current.1),
+                );
+                match sh.kind {
+                    crate::shape::ShapeKind::Rect => {
+                        let r = crate::geometry::Rect::new(
+                            x0.floor() as i32,
+                            y0.floor() as i32,
+                            (x1.ceil() - x0.floor()) as u32,
+                            (y1.ceil() - y0.floor()) as u32,
+                        );
+                        crate::preview::fill_rect_flat(
+                            &mut self.frame, w, region, r, color, alpha,
+                        );
+                    }
+                    crate::shape::ShapeKind::Ellipse => {
+                        let (a, b) = (
+                            vp.canvas_to_screen(sh.anchor.0, sh.anchor.1),
+                            vp.canvas_to_screen(sh.current.0, sh.current.1),
+                        );
+                        crate::preview::fill_ellipse_flat(
+                            &mut self.frame,
+                            w,
+                            region,
+                            (a.0 + b.0) / 2.0,
+                            (a.1 + b.1) / 2.0,
+                            ((b.0 - a.0) / 2.0).abs(),
+                            ((b.1 - a.1) / 2.0).abs(),
+                            color,
+                            alpha,
+                        );
+                    }
+                    crate::shape::ShapeKind::Line => {}
+                }
+            } else {
+                // 描边预览：画布空间 dab 链 → 屏幕空间平铺盖章
+                let dabs = crate::shape::shape_dabs(
+                    sh.kind, sh.anchor, sh.current, radius, hardness, color, alpha,
+                );
+                let zoom = vp.zoom() as f32;
+                let screen_dabs: Vec<Dab> = dabs
+                    .into_iter()
+                    .map(|mut d| {
+                        let (sx, sy) = vp.canvas_to_screen(d.x, d.y);
+                        d.x = sx;
+                        d.y = sy;
+                        d.radius *= zoom;
+                        d
+                    })
+                    .collect();
+                crate::preview::stamp_dabs_flat(&mut self.frame, w, region, &screen_dabs);
+            }
+        }
         surface.present_cpu(&self.frame, self.size, Some(region));
         self.dirty = Dirty::Clean;
     }
 
     /// 撤销一步。
     pub fn undo(&mut self) -> bool {
-        if self.transforming() {
-            return false; // 变换未提交前不动历史（提交时整组入史）
+        if self.transforming() || self.shape_drag.is_some() {
+            return false; // 变换/形状拖拽未提交前不动历史
         }
         if self.doc.undo() {
+            self.refresh_stale_objects();
             self.dirty = Dirty::All;
             true
         } else {
+            log::debug!("[history] 撤销被拒绝（无可撤销项）");
             false
         }
     }
 
     /// 重做一步。
     pub fn redo(&mut self) -> bool {
-        if self.transforming() {
+        if self.transforming() || self.shape_drag.is_some() {
             return false;
         }
         if self.doc.redo() {
+            self.refresh_stale_objects();
             self.dirty = Dirty::All;
             true
         } else {
@@ -1938,18 +2319,61 @@ impl Engine {
         // 笔落下即接管：清除进行中的触摸手势
         if phase == PointerPhase::Down && (!self.touches.is_empty() || self.gesture.is_some()) {
             self.cancel_stroke();
+            self.cancel_shape();
             self.touches.clear();
             self.gesture = None;
             self.gesture_latch = false;
         }
-        match phase {
-            PointerPhase::Down => {
-                if self.stroke.is_none() && self.doc.layers().try_active().is_some() {
-                    self.begin_stroke(&sample);
+        match self.tool {
+            // 文字：点击命中已有对象 → 拖拽移动 / 壳层取编辑；未命中 → 新锚点
+            Tool::Text => match phase {
+                PointerPhase::Down => {
+                    let (x, y) = self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+                    if let Some((layer, idx)) = self.hit_test_object(x, y) {
+                        self.text_editing = Some((layer, idx));
+                        self.last_text_target = Some((layer, idx));
+                        self.obj_drag_before =
+                            Some((layer, self.doc.layers().get(layer).objects.clone()));
+                        self.object_moving = Some(ObjectMoving {
+                            layer,
+                            index: idx,
+                            last: (x, y),
+                            pointer: sample.id,
+                        });
+                    } else {
+                        self.text_anchor = Some((x, y));
+                    }
+                }
+                PointerPhase::Move => {
+                    let (x, y) = self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+                    self.move_object(x, y, sample.id);
+                }
+                PointerPhase::Up => self.end_object_move(),
+                PointerPhase::Cancel => self.cancel_object_move(),
+            }
+            // 油漆桶：点击即填充
+            Tool::Fill { tolerance } => {
+                if phase == PointerPhase::Down {
+                    let (x, y) = self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+                    self.flood_fill(x as i64, y as i64, tolerance);
                 }
             }
-            PointerPhase::Move => self.extend_stroke(&sample),
-            PointerPhase::Up | PointerPhase::Cancel => self.end_stroke(),
+            // 形状：拖拽状态机（Up 提交 / Cancel 放弃）
+            Tool::Shape { .. } => match phase {
+                PointerPhase::Down => self.begin_shape(&sample),
+                PointerPhase::Move => self.move_shape(&sample),
+                PointerPhase::Up => self.commit_shape(),
+                PointerPhase::Cancel => self.cancel_shape(),
+            },
+            _ => match phase {
+                PointerPhase::Down => {
+                    if self.stroke.is_none() && self.doc.layers().try_active().is_some() {
+                        self.begin_stroke(&sample);
+                    }
+                }
+                PointerPhase::Move => self.extend_stroke(&sample),
+                PointerPhase::Up | PointerPhase::Cancel => self.end_stroke(),
+            },
         }
     }
 
@@ -1962,8 +2386,9 @@ impl Engine {
             PointerPhase::Down => {
                 self.touches.insert(sample.id, (sample.x, sample.y));
                 if self.touches.len() >= 2 {
-                    // 第二指落下：取消误触笔画，进入手势
+                    // 第二指落下：取消误触笔画/形状拖拽，进入手势
                     self.cancel_stroke();
+                    self.cancel_shape();
                     if let Some((c, d)) = centroid_and_dist(&self.touches) {
                         self.gesture = Some(Gesture {
                             centroid: c,
@@ -1971,11 +2396,57 @@ impl Engine {
                         });
                         self.gesture_latch = true;
                     }
-                } else if !self.gesture_latch
-                    && self.stroke.is_none()
-                    && self.doc.layers().try_active().is_some()
-                {
-                    self.begin_stroke(&sample);
+                } else if !self.gesture_latch && !self.transforming() {
+                    match self.tool {
+                        Tool::Text => match phase {
+                            PointerPhase::Down => {
+                                let (x, y) = self
+                                    .doc
+                                    .viewport()
+                                    .screen_to_canvas(sample.x, sample.y);
+                                if let Some((layer, idx)) = self.hit_test_object(x, y) {
+                                    self.text_editing = Some((layer, idx));
+                                    self.last_text_target = Some((layer, idx));
+                                    self.obj_drag_before = Some((
+                                        layer,
+                                        self.doc.layers().get(layer).objects.clone(),
+                                    ));
+                                    self.object_moving = Some(ObjectMoving {
+                                        layer,
+                                        index: idx,
+                                        last: (x, y),
+                                        pointer: sample.id,
+                                    });
+                                } else {
+                                    self.text_anchor = Some((x, y));
+                                }
+                            }
+                            PointerPhase::Move => {
+                                let (x, y) = self
+                                    .doc
+                                    .viewport()
+                                    .screen_to_canvas(sample.x, sample.y);
+                                self.move_object(x, y, sample.id);
+                            }
+                            PointerPhase::Up => self.end_object_move(),
+                            PointerPhase::Cancel => self.cancel_object_move(),
+                        },
+                        Tool::Fill { tolerance } => {
+                            let (x, y) =
+                                self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+                            self.flood_fill(x as i64, y as i64, tolerance);
+                        }
+                        Tool::Shape { .. } => {
+                            if self.shape_drag.is_none() {
+                                self.begin_shape(&sample);
+                            }
+                        }
+                        _ => {
+                            if self.stroke.is_none() && self.doc.layers().try_active().is_some() {
+                                self.begin_stroke(&sample);
+                            }
+                        }
+                    }
                 }
             }
             PointerPhase::Move => {
@@ -1997,6 +2468,8 @@ impl Engine {
                     }
                 } else if self.stroke.is_some() {
                     self.extend_stroke(&sample);
+                } else if self.shape_drag.is_some() {
+                    self.move_shape(&sample);
                 }
             }
             PointerPhase::Up | PointerPhase::Cancel => {
@@ -2007,8 +2480,17 @@ impl Engine {
                 if self.touches.is_empty() {
                     self.gesture_latch = false;
                 }
-                if self.gesture.is_none() && !self.gesture_latch && self.stroke.is_some() {
-                    self.end_stroke();
+                if self.gesture.is_none() && !self.gesture_latch {
+                    if self.stroke.is_some() {
+                        self.end_stroke();
+                    }
+                    if self.shape_drag.is_some() {
+                        if phase == PointerPhase::Up {
+                            self.commit_shape();
+                        } else {
+                            self.cancel_shape();
+                        }
+                    }
                 }
             }
         }
@@ -2079,6 +2561,23 @@ impl Engine {
         for dab in &dabs {
             self.expand_dirty(dab);
         }
+        // 对象层：笔画进行中的瓦片变化同步合并缓存（commit 收口只管提交后）
+        let has_objs = self
+            .doc
+            .layers()
+            .try_get(layer)
+            .map(|l| !l.objects.is_empty())
+            .unwrap_or(false);
+        if has_objs {
+            let ids: Vec<TileId> = dabs
+                .iter()
+                .map(|d| TileId::at(d.x.floor() as i64, d.y.floor() as i64))
+                .collect();
+            self.doc
+                .layers_mut()
+                .get_mut(layer)
+                .sync_tiles(ids.into_iter());
+        }
     }
 
     fn end_stroke(&mut self) {
@@ -2121,6 +2620,495 @@ impl Engine {
         self.dirty = Dirty::All;
     }
 
+    // ── 形状工具状态机 ──
+    // 预览只进帧缓冲（render() 合成后叠加），提交才落瓦片入撤销。
+
+    fn begin_shape(&mut self, sample: &PointerSample) {
+        if self.shape_drag.is_some() || self.doc.layers().try_active().is_none() {
+            return;
+        }
+        let Tool::Shape { kind, fill } = self.tool else {
+            return;
+        };
+        let (x, y) = self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+        let layer = self.doc.active_layer();
+        self.shape_drag = Some(ActiveShape {
+            kind,
+            fill,
+            anchor: (x, y),
+            current: (x, y),
+            layer,
+            pointer: sample.id,
+        });
+    }
+
+    fn move_shape(&mut self, sample: &PointerSample) {
+        let Some(sh) = self.shape_drag.as_ref() else {
+            return;
+        };
+        if sh.pointer != sample.id {
+            return;
+        }
+        let (kind, anchor, old) = (sh.kind, sh.anchor, sh.current);
+        // 旧区域重合成擦掉旧预览，新区域画新预览
+        self.dirty_shape(&kind, anchor, old);
+        let (x, y) = self.doc.viewport().screen_to_canvas(sample.x, sample.y);
+        if let Some(sh) = self.shape_drag.as_mut() {
+            sh.current = (x, y);
+        }
+        self.dirty_shape(&kind, anchor, (x, y));
+    }
+
+    /// 提交形状：描边 = dab 链走正规盖章管线（吃笔刷参数）；
+    /// 填充 = ShapeWriter 直接写像素（纯色）。整组入撤销。
+    fn commit_shape(&mut self) {
+        let Some(sh) = self.shape_drag.take() else {
+            return;
+        };
+        self.dirty_shape(&sh.kind, sh.anchor, sh.current);
+        // 拖拽期间图层可能被删（极端时序），防御兜底
+        if self.doc.layers_mut().try_get_mut(sh.layer).is_none() {
+            return;
+        }
+        if sh.fill && sh.kind != crate::shape::ShapeKind::Line {
+            let color = self.brush.color;
+            let mut rec = StrokeRecorder::new(sh.layer);
+            let layer = self.doc.layers_mut().get_mut(sh.layer);
+            {
+                let mut w = crate::shape::ShapeWriter::new(&mut layer.tiles, &mut rec, color);
+                let (x0, y0) = (sh.anchor.0.min(sh.current.0), sh.anchor.1.min(sh.current.1));
+                let (x1, y1) = (sh.anchor.0.max(sh.current.0), sh.anchor.1.max(sh.current.1));
+                match sh.kind {
+                    crate::shape::ShapeKind::Rect => {
+                        if x1 - x0 >= 1.0 && y1 - y0 >= 1.0 {
+                            w.fill_rect(crate::geometry::Rect::new(
+                                x0 as i32,
+                                y0 as i32,
+                                (x1 - x0) as u32,
+                                (y1 - y0) as u32,
+                            ));
+                        }
+                    }
+                    crate::shape::ShapeKind::Ellipse => {
+                        w.fill_ellipse(
+                            (sh.anchor.0 + sh.current.0) / 2.0,
+                            (sh.anchor.1 + sh.current.1) / 2.0,
+                            ((sh.current.0 - sh.anchor.0) / 2.0).abs(),
+                            ((sh.current.1 - sh.anchor.1) / 2.0).abs(),
+                        );
+                    }
+                    crate::shape::ShapeKind::Line => unreachable!("上方已排除"),
+                }
+            }
+            let group = rec.finish("Shape");
+            if !group.tile_ids().is_empty() {
+                self.doc.commit(group);
+            }
+        } else {
+            // 描边（含"填充+直线"退化：直线无填充语义，按描边走）
+            let dabs = crate::shape::shape_dabs(
+                sh.kind,
+                sh.anchor,
+                sh.current,
+                self.brush.size / 2.0,
+                self.brush.hardness,
+                self.brush.color,
+                self.brush.opacity,
+            );
+            let mut rec = StrokeRecorder::new(sh.layer);
+            let selection = self.doc.selection().cloned();
+            let layer = self.doc.layers_mut().get_mut(sh.layer);
+            self.renderer
+                .stamp_dabs(&mut layer.tiles, &dabs, selection.as_ref(), &mut rec);
+            for dab in &dabs {
+                self.expand_dirty(dab);
+            }
+            let group = rec.finish("Shape");
+            if !group.tile_ids().is_empty() {
+                log::info!("[shape] 提交 {:?}{}（anchor=({:.0},{:.0}) current=({:.0},{:.0})）",
+                    sh.kind, if sh.fill { "填充" } else { "" }, sh.anchor.0, sh.anchor.1, sh.current.0, sh.current.1);
+                self.doc.commit(group);
+            }
+        }
+    }
+
+    /// 放弃拖拽（工具切换/失焦/Cancel/第二指）：只清预览区域，无历史。
+    fn cancel_shape(&mut self) {
+        if let Some(sh) = self.shape_drag.take() {
+            self.dirty_shape(&sh.kind, sh.anchor, sh.current);
+        }
+    }
+
+    /// 形状包围盒 → 屏幕脏区（含笔刷半径外扩；旋转经四角 AABB）。
+    fn dirty_shape(
+        &mut self,
+        kind: &crate::shape::ShapeKind,
+        anchor: (f64, f64),
+        current: (f64, f64),
+    ) {
+        let margin = (self.brush.size / 2.0 + 2.0) as f64;
+        let (cx0, cy0, cx1, cy1) =
+            crate::shape::shape_bbox(*kind, anchor, current, margin);
+        let vp = self.doc.viewport();
+        let corners = [
+            vp.canvas_to_screen(cx0, cy0),
+            vp.canvas_to_screen(cx1, cy0),
+            vp.canvas_to_screen(cx0, cy1),
+            vp.canvas_to_screen(cx1, cy1),
+        ];
+        let xs = [corners[0].0, corners[1].0, corners[2].0, corners[3].0];
+        let ys = [corners[0].1, corners[1].1, corners[2].1, corners[3].1];
+        let x0 = xs.iter().cloned().fold(f64::MAX, f64::min).floor() as i32;
+        let y0 = ys.iter().cloned().fold(f64::MAX, f64::min).floor() as i32;
+        let x1 = xs.iter().cloned().fold(f64::MIN, f64::max).ceil() as i32;
+        let y1 = ys.iter().cloned().fold(f64::MIN, f64::max).ceil() as i32;
+        if x1 > x0 && y1 > y0 {
+            let r = crate::geometry::Rect::new(
+                x0,
+                y0,
+                (x1 - x0) as u32,
+                (y1 - y0) as u32,
+            );
+            self.dirty.union(r);
+        }
+    }
+
+    /// 文字工具锚点：壳层取走后弹输入框，再调 [`Engine::draw_text`]。
+    /// 返回画布坐标；重复调用第二次返回 None（一次性）。
+    pub fn take_text_anchor(&mut self) -> Option<(f64, f64)> {
+        self.text_anchor.take()
+    }
+
+    /// 画布 → 屏幕坐标（壳层定位输入浮层用）。
+    pub fn canvas_to_screen(&self, x: f64, y: f64) -> (f64, f64) {
+        self.doc.viewport().canvas_to_screen(x, y)
+    }
+
+    /// 视口定位：把画布坐标 (x,y) 移到屏幕中心（小地图拖动）。
+    /// 旋转/翻转下经正向变换逆解，方向正确。
+    pub fn viewport_center_on(&mut self, x: f64, y: f64) {
+        let (w, h) = self.size;
+        if w == 0 || h == 0 {
+            return;
+        }
+        let vp = self.doc.viewport().clone();
+        let (tx, ty) = vp.canvas_to_screen(x, y);
+        let (pan_x, pan_y) = vp.pan();
+        // 变换向量（不含平移）= cts - pan → 新 pan = 屏幕中心 - 向量
+        let vec = (tx - pan_x, ty - pan_y);
+        self.doc
+            .viewport_mut()
+            .set_pan(w as f64 / 2.0 - vec.0, h as f64 / 2.0 - vec.1);
+        log::debug!("[viewport] 定位到画布 ({x:.0},{y:.0})");
+    }
+
+    /// 当前可见画布区域（AABB；旋转下四角包围盒）。
+    /// 返回 (x, y, w, h)；供小地图绘制主视口指示框。
+    pub fn viewport_rect(&self) -> (f64, f64, f64, f64) {
+        let (w, h) = self.size;
+        let vp = self.doc.viewport();
+        let corners = [
+            vp.screen_to_canvas(0.0, 0.0),
+            vp.screen_to_canvas(w as f64, 0.0),
+            vp.screen_to_canvas(0.0, h as f64),
+            vp.screen_to_canvas(w as f64, h as f64),
+        ];
+        let x0 = corners.iter().map(|c| c.0).fold(f64::MAX, f64::min);
+        let y0 = corners.iter().map(|c| c.1).fold(f64::MAX, f64::min);
+        let x1 = corners.iter().map(|c| c.0).fold(f64::MIN, f64::max);
+        let y1 = corners.iter().map(|c| c.1).fold(f64::MIN, f64::max);
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// 小地图：内容包围盒缩放到 max_w×max_h 内的 PNG（白底）。
+    /// 返回 (png, 输出宽, 输出高, 内容包围盒 x/y/w/h)——
+    /// 壳层以"包围盒 ↔ 小地图"线性映射换算拖动位置与视口框。
+    pub fn minimap_png(
+        &mut self,
+        max_w: u32,
+        max_h: u32,
+    ) -> Option<(Vec<u8>, u32, u32, f64, f64, f64, f64)> {
+        if max_w == 0 || max_h == 0 {
+            return None;
+        }
+        let b = self.visible_content_bounds()?;
+        let scale = (max_w as f64 / b.w as f64)
+            .min(max_h as f64 / b.h as f64)
+            .max(0.005) as f32;
+        let png = self.export_png(Some(b), scale, false)?;
+        let (ow, oh) = (
+            ((b.w as f64) * scale as f64).ceil().max(1.0) as u32,
+            ((b.h as f64) * scale as f64).ceil().max(1.0) as u32,
+        );
+        Some((png, ow, oh, b.x as f64, b.y as f64, b.w as f64, b.h as f64))
+    }
+
+    // ── 文字对象（非破坏：源数据持久，可重编辑/移动/删除/撤销）──
+
+    /// 设置文字字体字节（swash 光栅化用；Android/桌面启动时加载系统字体）。
+    /// Web 壳层用浏览器渲染提供 raster，可不设。
+    pub fn set_text_font(&mut self, font: Vec<u8>) {
+        self.text_font = Some(std::sync::Arc::new(font));
+        // 已有 swash 无法光栅化的对象现在可以补渲染了
+        self.refresh_stale_objects();
+    }
+
+    /// 命中测试：自顶向下找第一个包围盒包含 (x,y) 的对象。
+    fn hit_test_object(&self, x: f64, y: f64) -> Option<(LayerId, usize)> {
+        let all: Vec<(LayerId, &Layer)> = self.doc.layers().iter_with_id().collect();
+        for (id, layer) in all.iter().rev() {
+            let (id, layer) = (*id, *layer);
+            if !layer.visible {
+                continue;
+            }
+            for (i, obj) in layer.objects.iter().enumerate().rev() {
+                if let Some(b) = obj.bbox() {
+                    let (x0, y0) = (b.x as f64, b.y as f64);
+                    let (x1, y1) = (b.x as f64 + b.w as f64, b.y as f64 + b.h as f64);
+                    if x >= x0 - 4.0 && x <= x1 + 4.0 && y >= y0 - 4.0 && y <= y1 + 4.0 {
+                        return Some((id, i));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 命中的编辑目标信息（壳层预填编辑框）。一次性取走。
+    pub fn take_text_edit(&mut self) -> Option<(String, f32, Color)> {
+        let (layer, idx) = self.text_editing.take()?;
+        match self.doc.layers().get(layer).objects.get(idx) {
+            Some(crate::layer::DrawObject::Text { text, size, color, .. }) => {
+                Some((text.clone(), *size, *color))
+            }
+            _ => None,
+        }
+    }
+
+    /// 拖拽移动对象（文字工具按住已有对象拖动）。
+    fn move_object(&mut self, x: f64, y: f64, pointer: u64) {
+        let Some(m) = self.object_moving else {
+            return;
+        };
+        if m.pointer != pointer {
+            return;
+        }
+        let (dx, dy) = (x - m.last.0, y - m.last.1);
+        self.object_moving = Some(ObjectMoving { last: (x, y), ..m });
+        let layer = m.layer;
+        let idx = m.index;
+        if let Some(l) = self.doc.layers_mut().try_get_mut(layer) {
+            if let Some(obj) = l.objects.get_mut(idx) {
+                match obj {
+                    crate::layer::DrawObject::Text { pos, .. } => {
+                        pos.0 += dx;
+                        pos.1 += dy;
+                    }
+                    crate::layer::DrawObject::Shape { a, b, .. } => {
+                        a.0 += dx;
+                        a.1 += dy;
+                        b.0 += dx;
+                        b.1 += dy;
+                    }
+                }
+            }
+        }
+        self.rasterize_layer_objects(layer);
+    }
+
+    /// 结束拖拽：整组入撤销（快照在拖拽开始时捕获）。
+    fn end_object_move(&mut self) {
+        self.object_moving = None;
+        if let Some((layer, before)) = self.obj_drag_before.take() {
+            log::info!("[text] 拖动移动文字对象");
+            self.commit_objects_undo(layer, before, "MoveText");
+        }
+    }
+
+    /// 取消拖拽：恢复拖拽前对象列表。
+    fn cancel_object_move(&mut self) {
+        self.object_moving = None;
+        if let Some((layer, before)) = self.obj_drag_before.take() {
+            if let Some(l) = self.doc.layers_mut().try_get_mut(layer) {
+                l.objects = before;
+                self.rasterize_layer_objects(layer);
+            }
+        }
+    }
+
+    /// 对象列表变化的统一撤销提交。
+    fn commit_objects_undo(&mut self, layer: LayerId, before: Vec<crate::layer::DrawObject>, label: &'static str) {
+        let group = crate::history::UndoGroup {
+            label,
+            ops: vec![crate::history::UndoOp::Objects {
+                id: layer,
+                before,
+            }],
+        };
+        self.doc.commit(group);
+        self.dirty = Dirty::All;
+    }
+
+    /// 新增文字对象。`pos` 为基线原点（画布坐标）；`raster` 为壳层
+    /// 渲染位图（Web 浏览器字体路径；None = 引擎 swash 渲染）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_text_object(
+        &mut self,
+        pos: (f64, f64),
+        text: &str,
+        size: f32,
+        raster: Option<crate::layer::TextRaster>,
+    ) -> bool {
+        let layer = self.doc.active_layer();
+        let obj = crate::layer::DrawObject::Text {
+            pos,
+            text: text.to_string(),
+            size,
+            color: self.brush.color,
+            raster: raster.map(std::sync::Arc::new),
+            bbox: None,
+        };
+        let before = {
+            let l = self.doc.layers_mut().get_mut(layer);
+            let before = l.objects.clone();
+            l.objects.push(obj);
+            before
+        };
+        self.rasterize_layer_objects(layer);
+        log::info!("[text] 新增文字对象 {:?} size={size} at ({:.0},{:.0})", text, pos.0, pos.1);
+        self.commit_objects_undo(layer, before, "AddText");
+        true
+    }
+
+    /// 更新命中的文字对象（编辑内容/字号；raster 语义同 add）。
+    pub fn update_text_object(
+        &mut self,
+        text: &str,
+        size: f32,
+        raster: Option<crate::layer::TextRaster>,
+    ) -> bool {
+        // text_editing 已被 take——记录最近编辑目标以支持本调用
+        let Some((layer, idx)) = self.last_text_target else {
+            return false;
+        };
+        let before = {
+            let Some(l) = self.doc.layers_mut().try_get_mut(layer) else {
+                return false;
+            };
+            let before = l.objects.clone();
+            let Some(obj) = l.objects.get_mut(idx) else {
+                return false;
+            };
+            let crate::layer::DrawObject::Text {
+                text: t,
+                size: s,
+                raster: r,
+                ..
+            } = obj
+            else {
+                return false;
+            };
+            *t = text.to_string();
+            *s = size;
+            if let Some(ra) = raster {
+                *r = Some(std::sync::Arc::new(ra));
+            } else {
+                *r = None; // 重新 swash 渲染
+            }
+            before
+        };
+        self.rasterize_layer_objects(layer);
+        log::info!("[text] 更新文字对象 size={size}");
+        self.commit_objects_undo(layer, before, "EditText");
+        true
+    }
+
+    /// 删除最近命中的文字对象。
+    pub fn delete_text_object(&mut self) -> bool {
+        let Some((layer, idx)) = self.last_text_target else {
+            return false;
+        };
+        let before = {
+            let Some(l) = self.doc.layers_mut().try_get_mut(layer) else {
+                return false;
+            };
+            if idx >= l.objects.len() {
+                return false;
+            }
+            let before = l.objects.clone();
+            l.objects.remove(idx);
+            before
+        };
+        self.rasterize_layer_objects(layer);
+        log::info!("[text] 删除文字对象");
+        self.commit_objects_undo(layer, before, "DeleteText");
+        true
+    }
+
+    /// 重建图层对象光栅化缓存（obj_tiles + merged + bbox/arc raster 回写）。
+    fn rasterize_layer_objects(&mut self, layer: LayerId) {
+        let font = self.text_font.clone();
+        let Some(l) = self.doc.layers_mut().try_get_mut(layer) else {
+            return;
+        };
+        l.obj_tiles = TileGrid::new();
+        for obj in l.objects.iter_mut() {
+            match obj {
+                crate::layer::DrawObject::Text {
+                    pos,
+                    text,
+                    size,
+                    color,
+                    raster,
+                    bbox,
+                } => {
+                    // 光栅缺失时尝试 swash（字体已设置）
+                    if raster.is_none() {
+                        if let Some(f) = font.as_ref() {
+                            *raster = swash_text_raster(f, text, *pos, *size, *color)
+                                .map(std::sync::Arc::new);
+                        }
+                    }
+                    if let Some(ra) = raster.as_ref() {
+                        let (ox, oy) = (
+                            pos.0.round() as i64 + ra.dx,
+                            pos.1.round() as i64 + ra.dy,
+                        );
+                        blit_premul(&mut l.obj_tiles, &ra.premul, ra.w, ra.h, ox, oy);
+                        *bbox = Some(Rect::new(
+                            ox as i32,
+                            oy as i32,
+                            ra.w,
+                            ra.h,
+                        ));
+                    } else {
+                        *bbox = None; // 无法光栅化（无字体）：不显示也不命中
+                    }
+                }
+                crate::layer::DrawObject::Shape { bbox, .. } => {
+                    // 形状对象 UI 接入时补光栅化；当前不可见不命中
+                    *bbox = None;
+                }
+            }
+        }
+        l.sync_all_objects();
+        self.dirty = Dirty::All;
+    }
+
+    /// 撤销/重做/载入后：重建标记为 stale 的对象层。
+    fn refresh_stale_objects(&mut self) {
+        let stale: Vec<LayerId> = self
+            .doc
+            .layers()
+            .iter_with_id()
+            .filter(|(_, l)| l.obj_stale)
+            .map(|(id, _)| id)
+            .collect();
+        for id in stale {
+            self.rasterize_layer_objects(id);
+        }
+    }
+
     fn expand_dirty(&mut self, dab: &Dab) {
         let r = dab.radius as f64 + 1.0;
         let vp = self.doc.viewport();
@@ -2158,9 +3146,104 @@ impl UndoGroup {
     }
 }
 
+/// 读瓦片网格画布坐标处像素（无瓦片 = 全透明）。
+fn layer_px(grid: &TileGrid, x: i64, y: i64) -> [u8; 4] {
+    let tid = TileId::at(x, y);
+    match grid.get(tid) {
+        Some(t) => {
+            let (ox, oy) = tid.origin();
+            let i = (((y - oy) * 256 + (x - ox)) * 4) as usize;
+            let p = t.pixels();
+            if i + 3 < p.len() {
+                [p[i], p[i + 1], p[i + 2], p[i + 3]]
+            } else {
+                [0, 0, 0, 0]
+            }
+        }
+        None => [0, 0, 0, 0],
+    }
+}
+
+/// swash 渲染文字 → 光栅缓存（预乘 RGBA + 相对 pos 偏移）。
+#[cfg(feature = "text")]
+fn swash_text_raster(
+    font: &[u8],
+    text: &str,
+    pos: (f64, f64),
+    size: f32,
+    color: crate::color::Color,
+) -> Option<crate::layer::TextRaster> {
+    let mut grid = TileGrid::new();
+    let mut rec = StrokeRecorder::new(LayerId::from_raw(0));
+    let bounds = crate::shape::draw_text(
+        &mut grid,
+        &mut rec,
+        font,
+        text,
+        pos.0.round() as i64,
+        pos.1.round() as i64,
+        size,
+        color,
+    )?;
+    let (w, h) = (bounds.w, bounds.h);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let (px, py) = (bounds.x as i64 + x, bounds.y as i64 + y);
+            let tid = TileId::at(px, py);
+            let Some(t) = grid.get(tid) else {
+                continue;
+            };
+            let (ox, oy) = tid.origin();
+            let i = (((py - oy) * 256 + (px - ox)) * 4) as usize;
+            let o = ((y * w as i64 + x) * 4) as usize;
+            out[o..o + 4].copy_from_slice(&t.pixels()[i..i + 4]);
+        }
+    }
+    Some(crate::layer::TextRaster {
+        premul: out,
+        w,
+        h,
+        dx: bounds.x as i64 - pos.0.round() as i64,
+        dy: bounds.y as i64 - pos.1.round() as i64,
+    })
+}
+
+/// 预乘 RGBA 位图 over-blit 进瓦片网格（对象光栅化缓存写入）。
+fn blit_premul(grid: &mut TileGrid, src: &[u8], w: u32, h: u32, ox: i64, oy: i64) {
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let s = ((y * w as i64 + x) * 4) as usize;
+            let sa = src[s + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let (px, py) = (ox + x, oy + y);
+            let tid = TileId::at(px, py);
+            let t = grid.get_or_create_mut(tid);
+            let (tx, ty) = tid.origin();
+            let i = (((py - ty) * 256 + (px - tx)) * 4) as usize;
+            if i + 3 >= t.pixels_mut().len() {
+                continue;
+            }
+            let d = &mut t.pixels_mut()[i..i + 4];
+            if sa == 255 {
+                d.copy_from_slice(&src[s..s + 4]);
+            } else {
+                for k in 0..3 {
+                    d[k] = (src[s + k] as u32 + d[k] as u32 * (255 - sa) / 255) as u8;
+                }
+                d[3] = (sa + d[3] as u32 * (255 - sa) / 255) as u8;
+            }
+        }
+    }
+}
+
 fn mark_erase(dabs: &mut [Dab], tool: Tool) {
-    if tool == Tool::Eraser {
-        for d in dabs.iter_mut() {
+    if tool == Tool::Eraser {        for d in dabs.iter_mut() {
             d.erase = true;
         }
     }
@@ -2187,7 +3270,7 @@ fn builtin_presets() -> Vec<(String, RoundBrush)> {
         mk("硬圆笔", |b| {
             b.size = 10.0;
             b.hardness = 1.0;
-            b.spacing = 0.12;
+            b.spacing = 0.04;
             b.smoothing = 0.2;
         }),
         mk("软圆笔", |b| {
@@ -2195,7 +3278,7 @@ fn builtin_presets() -> Vec<(String, RoundBrush)> {
             b.hardness = 0.15;
             b.opacity = 0.8;
             b.flow = 0.9;
-            b.spacing = 0.08;
+            b.spacing = 0.05;
             b.smoothing = 0.3;
         }),
         mk("马克笔", |b| {
@@ -2211,13 +3294,13 @@ fn builtin_presets() -> Vec<(String, RoundBrush)> {
             b.hardness = 0.0;
             b.opacity = 0.5;
             b.flow = 0.12;
-            b.spacing = 0.35;
+            b.spacing = 0.12;
             b.smoothing = 0.4;
         }),
         mk("书法笔", |b| {
             b.size = 18.0;
             b.hardness = 0.9;
-            b.spacing = 0.1;
+            b.spacing = 0.06;
             b.tilt_sensitivity = 1.0;
         }),
         mk("细节铅笔", |b| {
@@ -2246,6 +3329,7 @@ impl Engine {
 
     /// 应用预设（克隆参数到当前笔刷；纹理尖不随预设，记录为限制）。
     pub fn apply_preset(&mut self, name: &str) -> bool {
+        log::info!("[preset] 应用预设 \"{name}\"");
         let Some(i) = self.presets.iter().position(|(n, _)| n == name) else {
             return false;
         };
@@ -2258,6 +3342,7 @@ impl Engine {
 
     /// 当前笔刷存为预设：与当前预设同名则覆盖，否则新建。
     pub fn save_preset(&mut self, name: &str) -> bool {
+        log::info!("[preset] 保存预设 \"{name}\"");
         let name = name.replace(['\t', '\n', '\r'], " ").trim().to_string();
         if name.is_empty() {
             return false;
@@ -2276,6 +3361,7 @@ impl Engine {
 
     /// 删除预设。
     pub fn delete_preset(&mut self, name: &str) -> bool {
+        log::info!("[preset] 删除预设 \"{name}\"");
         let Some(i) = self.presets.iter().position(|(n, _)| n == name) else {
             return false;
         };
@@ -2509,6 +3595,313 @@ mod tests {
             h: 64,
             scale: 1.0,
         });
+    }
+
+    /// 在每个 dab 中心写单像素的渲染器（形状提交路径的落墨/撤销验证）。
+    pub(super) struct CenterDotRenderer;
+
+    impl Renderer for CenterDotRenderer {
+        fn stamp_dabs(
+            &mut self,
+            grid: &mut crate::tile::TileGrid,
+            dabs: &[Dab],
+            _clip: Option<&crate::tile::TileGrid>,
+            recorder: &mut StrokeRecorder,
+        ) {
+            for d in dabs {
+                let (x, y) = (d.x.round() as i64, d.y.round() as i64);
+                let tid = crate::tile::TileId::at(x, y);
+                recorder.capture(grid, tid);
+                let t = grid.get_or_create_mut(tid);
+                let (ox, oy) = tid.origin();
+                let i = (((y - oy) * 256 + (x - ox)) * 4) as usize;
+                if i + 3 < t.pixels_mut().len() {
+                    t.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+
+        fn composite(
+            &mut self,
+            _doc: &Document,
+            _target: &mut [u8],
+            _width: u32,
+            _dirty: Rect,
+            _bg: Option<Color>,
+        ) {
+        }
+
+        fn merge_layers(
+            &mut self,
+            _dst: &mut crate::layer::Layer,
+            _src: &crate::layer::Layer,
+            _recorder: &mut StrokeRecorder,
+        ) {
+        }
+    }
+
+    fn shape_engine() -> Engine {
+        Engine::new(Box::new(CenterDotRenderer), EngineConfig::default())
+    }
+
+    /// 画布坐标处的 alpha（无瓦片 = 0）。
+    fn ink(e: &Engine, x: i64, y: i64) -> u8 {
+        let tid = crate::tile::TileId::at(x, y);
+        let layers = e.document().layers();
+        layers
+            .try_active()
+            .and_then(|id| layers.get(id).tiles.get(tid))
+            .map(|t| {
+                let (ox, oy) = tid.origin();
+                t.pixels()[(((y - oy) * 256 + (x - ox)) * 4) as usize + 3]
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn shape_line_stroke_commits_and_undoes() {
+        let mut e = shape_engine();
+        resize(&mut e);
+        e.set_tool(Tool::Shape {
+            kind: crate::shape::ShapeKind::Line,
+            fill: false,
+        });
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 30.0));
+        e.handle_event(pointer(PointerPhase::Move, 40.0, 30.0));
+        e.handle_event(pointer(PointerPhase::Up, 40.0, 30.0));
+        assert_eq!(e.document().history().undo_len(), 1, "形状整组入撤销");
+        assert_eq!(ink(&e, 25, 30), 255, "直线经过处有墨");
+        assert!(e.undo());
+        assert_eq!(ink(&e, 25, 30), 0, "撤销后复原");
+    }
+
+    #[test]
+    fn shape_rect_fill_commits_and_undoes() {
+        let mut e = shape_engine();
+        resize(&mut e);
+        e.set_tool(Tool::Shape {
+            kind: crate::shape::ShapeKind::Rect,
+            fill: true,
+        });
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 10.0));
+        e.handle_event(pointer(PointerPhase::Move, 30.0, 25.0));
+        e.handle_event(pointer(PointerPhase::Up, 30.0, 25.0));
+        assert_eq!(e.document().history().undo_len(), 1);
+        assert_eq!(ink(&e, 20, 18), 255, "矩形内部有墨");
+        assert_eq!(ink(&e, 5, 5), 0, "矩形外无墨");
+        assert!(e.undo());
+        assert_eq!(ink(&e, 20, 18), 0);
+    }
+
+    #[test]
+    fn shape_drag_writes_nothing_until_up() {
+        let mut e = shape_engine();
+        resize(&mut e);
+        e.set_tool(Tool::Shape {
+            kind: crate::shape::ShapeKind::Line,
+            fill: false,
+        });
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 30.0));
+        e.handle_event(pointer(PointerPhase::Move, 40.0, 30.0));
+        // 拖拽中：预览只进帧，瓦片无墨、无历史、撤销被守卫
+        assert_eq!(e.document().history().undo_len(), 0);
+        assert_eq!(ink(&e, 25, 30), 0);
+        assert!(!e.undo(), "拖拽中撤销被守卫");
+        e.handle_event(pointer(PointerPhase::Up, 40.0, 30.0));
+        assert_eq!(ink(&e, 25, 30), 255);
+    }
+
+    #[test]
+    fn shape_cancel_and_tool_switch_leave_no_trace() {
+        // Cancel 事件：放弃
+        let mut e = shape_engine();
+        resize(&mut e);
+        e.set_tool(Tool::Shape {
+            kind: crate::shape::ShapeKind::Rect,
+            fill: false,
+        });
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 10.0));
+        e.handle_event(pointer(PointerPhase::Move, 30.0, 25.0));
+        e.handle_event(pointer(PointerPhase::Cancel, 30.0, 25.0));
+        assert_eq!(e.document().history().undo_len(), 0);
+        assert_eq!(ink(&e, 20, 18), 0);
+        // 拖拽中切工具：同样放弃
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 10.0));
+        e.handle_event(pointer(PointerPhase::Move, 30.0, 25.0));
+        e.set_tool(Tool::Brush);
+        assert_eq!(e.document().history().undo_len(), 0);
+        assert_eq!(ink(&e, 20, 18), 0);
+    }
+
+    #[test]
+    fn text_tool_anchor_take_once() {
+        let mut e = engine();
+        resize(&mut e);
+        e.set_tool(Tool::Text);
+        e.handle_event(pointer(PointerPhase::Down, 20.0, 40.0));
+        assert_eq!(e.take_text_anchor(), Some((20.0, 40.0)));
+        assert_eq!(e.take_text_anchor(), None, "锚点一次性取走");
+        // 画笔工具不落锚
+        e.set_tool(Tool::Brush);
+        e.handle_event(pointer(PointerPhase::Down, 5.0, 5.0));
+        assert_eq!(e.take_text_anchor(), None);
+        assert_eq!(e.document().history().undo_len(), 0, "落锚不入历史");
+    }
+
+    /// 活动层 id（try_active 返回 id，测试统一经 layers().get 取引用）。
+    fn active_id(e: &Engine) -> LayerId {
+        e.document().layers().try_active().expect("有活动层")
+    }
+
+    fn layer_of(e: &Engine) -> crate::layer::Layer {
+        // 深拷贝避免借用冲突的小对象（objects/tiles 断言用）
+        e.document().layers().get(active_id(e)).clone()
+    }
+
+    /// 2×2 红色光栅（文字对象测试用，不依赖字体）。
+    fn text_raster() -> crate::layer::TextRaster {
+        crate::layer::TextRaster {
+            premul: vec![255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255],
+            w: 2,
+            h: 2,
+            dx: 0,
+            dy: -2,
+        }
+    }
+
+    #[test]
+    fn text_object_crud_hit_edit_move_delete() {
+        let mut e = engine();
+        resize(&mut e);
+        assert!(e.add_text_object((100.0, 100.0), "hi", 32.0, Some(text_raster())));
+        // 命中 → 编辑信息
+        e.set_tool(Tool::Text);
+        e.handle_event(pointer(PointerPhase::Down, 100.0, 99.0)); // bbox 内
+        let edit = e.take_text_edit();
+        assert_eq!(edit.map(|(t, s, _)| (t, s)), Some(("hi".into(), 32.0)));
+        assert!(e.update_text_object("yo", 48.0, Some(text_raster())));
+        // 拖拽移动：Down 命中 → Move → Up（一组撤销）
+        e.handle_event(pointer(PointerPhase::Down, 100.0, 99.0));
+        e.handle_event(pointer(PointerPhase::Move, 140.0, 99.0));
+        e.handle_event(pointer(PointerPhase::Up, 140.0, 99.0));
+        let layer = layer_of(&e);
+        match &layer.objects[0] {
+            crate::layer::DrawObject::Text { pos, text, .. } => {
+                assert_eq!((pos.0 as i64, pos.1 as i64), (140, 100));
+                assert_eq!(text, "yo");
+            }
+            _ => panic!("对象类型"),
+        }
+        // 撤销移动 → 回到 (100,100)
+        assert!(e.undo());
+        let layer = layer_of(&e);
+        match &layer.objects[0] {
+            crate::layer::DrawObject::Text { pos, .. } => {
+                assert_eq!((pos.0 as i64, pos.1 as i64), (100, 100))
+            }
+            _ => panic!(),
+        }
+        // 删除 → 撤销 → 恢复
+        assert!(e.delete_text_object());
+        assert!(layer_of(&e).objects.is_empty());
+        assert!(e.undo());
+        assert_eq!(layer_of(&e).objects.len(), 1);
+    }
+
+    #[test]
+    fn text_object_ora_roundtrip() {
+        let mut e = engine();
+        resize(&mut e);
+        assert!(e.add_text_object((50.0, 60.0), "复机", 40.0, Some(text_raster())));
+        let bytes = e.save_ora().expect("存档");
+        let mut e2 = engine();
+        resize(&mut e2);
+        assert!(e2.load_ora(&bytes));
+        let layer = layer_of(&e2);
+        assert_eq!(layer.objects.len(), 1, "对象随 ORA 往返");
+        // stale 缓存经 render 重建 → 可命中编辑
+        let mut surf = TestSurface { presents: 0 };
+        e2.render(&mut surf);
+        e2.set_tool(Tool::Text);
+        e2.handle_event(pointer(PointerPhase::Down, 50.0, 59.0));
+        let edit = e2.take_text_edit();
+        assert_eq!(edit.map(|(t, _, _)| t), Some("复机".into()));
+    }
+
+    #[test]
+    fn object_layer_stroke_merges_into_content() {
+        // 对象层上画笔：笔画进 tiles，content() 合并对象（对象在上）
+        let mut e = shape_engine();
+        resize(&mut e);
+        assert!(e.add_text_object((10.0, 30.0), "x", 8.0, Some(text_raster())));
+        e.set_tool(Tool::Brush);
+        e.handle_event(pointer(PointerPhase::Down, 5.0, 5.0));
+        e.handle_event(pointer(PointerPhase::Move, 8.0, 5.0));
+        e.handle_event(pointer(PointerPhase::Up, 8.0, 5.0));
+        assert_eq!(ink(&e, 5, 5), 255, "笔画写入基础瓦片");
+        let layer = layer_of(&e);
+        let content_red = {
+            let tid = crate::tile::TileId::at(10, 29); // 对象光栅区域（pos(10,30) dy=-2）
+            layer
+                .content()
+                .get(tid)
+                .map(|t| {
+                    let (ox, oy) = tid.origin();
+                    let i = (((29 - oy) * 256 + (10 - ox)) * 4) as usize;
+                    t.pixels()[i]
+                })
+                .unwrap_or(0)
+        };
+        assert_eq!(content_red, 255, "对象进入合并内容");
+    }
+
+    #[test]
+    fn fps_monitor_config_and_toggle() {
+        let mut e = engine();
+        resize(&mut e);
+        let mut surf = TestSurface { presents: 0 };
+        assert!(e.fps_monitor_enabled(), "默认开启（配置项）");
+        assert_eq!(e.render_count(), 0);
+        for _ in 0..5 {
+            e.render(&mut surf);
+        }
+        assert_eq!(e.render_count(), 5, "呈现计数随 render 递增");
+        // 关闭后冻结
+        e.set_fps_monitor(false);
+        for _ in 0..3 {
+            e.render(&mut surf);
+        }
+        assert_eq!(e.render_count(), 5, "监控关闭后计数冻结");
+        e.set_fps_monitor(true);
+        e.render(&mut surf);
+        assert_eq!(e.render_count(), 6, "重开后恢复计数");
+    }
+
+    #[test]
+    fn flood_fill_blob_and_undo() {
+        let mut e = engine();
+        resize(&mut e);
+        // 形状工具画 20×20 黑色实心块（直写瓦片，与渲染器无关）
+        e.set_tool(Tool::Shape {
+            kind: crate::shape::ShapeKind::Rect,
+            fill: true,
+        });
+        e.handle_event(pointer(PointerPhase::Down, 10.0, 10.0));
+        e.handle_event(pointer(PointerPhase::Move, 30.0, 30.0));
+        e.handle_event(pointer(PointerPhase::Up, 30.0, 30.0));
+        // 红色油漆桶点内部：整块变红
+        e.brush_mut().color = crate::color::Color { r: 255, g: 0, b: 0 };
+        assert!(e.flood_fill(15, 15, 0));
+        let layer = layer_of(&e);
+        assert_eq!(layer_px(&layer.tiles, 15, 15)[0], 255, "内部被填充为红");
+        assert_eq!(layer_px(&layer.tiles, 15, 15)[1], 0);
+        assert_eq!(layer_px(&layer.tiles, 5, 5)[3], 0, "块外不受影响");
+        // 撤销 → 恢复黑
+        assert!(e.undo());
+        let layer = layer_of(&e);
+        assert_eq!(layer_px(&layer.tiles, 15, 15)[0], 0, "撤销恢复黑色");
+        // 点击无内容处：无操作（无限画布不发散）
+        assert!(!e.flood_fill(500, 500, 0), "空区域不发散");
     }
 
     #[test]

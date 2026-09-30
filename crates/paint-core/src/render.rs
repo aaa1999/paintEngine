@@ -54,6 +54,9 @@ pub struct EngineConfig {
     /// 撤销历史内存限额（字节）。
     pub undo_memory_limit: usize,
     pub brush: RoundBrush,
+    /// 帧率监控（默认开）：引擎在 render 时统计呈现帧率，
+    /// 壳层经 [`crate::engine::Engine::fps`] 读取展示。
+    pub fps_monitor: bool,
 }
 
 impl Default for EngineConfig {
@@ -62,6 +65,7 @@ impl Default for EngineConfig {
             background: Color::WHITE,
             undo_memory_limit: 256 * 1024 * 1024,
             brush: RoundBrush::default(),
+            fps_monitor: true,
         }
     }
 }

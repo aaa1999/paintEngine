@@ -9,6 +9,9 @@ members = [
     "crates/paint-gpu",
 ]
 
+[workspace.dependencies]
+log = "0.4"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
