@@ -89,6 +89,9 @@ class PaintEngineView @JvmOverloads constructor(
     private external fun nativeSetLogLevel(level: Int)
     private external fun nativeSaveOra(handle: Long): ByteArray?
     private external fun nativeLoadOra(handle: Long, data: ByteArray): Boolean
+    private external fun nativePrepareOra(data: ByteArray): Long
+    private external fun nativeApplyOra(handle: Long, prepared: Long): Boolean
+    private external fun nativeDropOra(prepared: Long)
     private external fun nativeSetBrushSize(handle: Long, size: Double)
     private external fun nativeSetBrushColor(handle: Long, r: Int, g: Int, b: Int)
     private external fun nativePresetNames(handle: Long): Array<String>?
@@ -365,8 +368,23 @@ class PaintEngineView @JvmOverloads constructor(
     /** 存 .ora 工程字节。 */
     fun saveOra(): ByteArray? = if (handle == 0L) null else nativeSaveOra(handle)
 
-    /** 载入 .ora 替换当前文档。 */
+    /** 载入 .ora 替换当前文档（同步，UI 线程；大档建议走 [prepareOra]/[applyOra]）。 */
     fun loadOra(data: ByteArray): Boolean = handle != 0L && nativeLoadOra(handle, data)
+
+    /**
+     * 后台线程解码 .ora（不碰引擎，线程安全）；返回解码句柄，0 = 失败。
+     * 句柄必须回 UI 线程经 [applyOra] 消费（无论应用与否都会释放）。
+     */
+    fun prepareOra(data: ByteArray): Long = nativePrepareOra(data)
+
+    /** 应用 [prepareOra] 的解码结果（UI 线程）；无条件消费释放解码句柄。 */
+    fun applyOra(prepared: Long): Boolean =
+        prepared != 0L && nativeApplyOra(handle, prepared)
+
+    /** 丢弃解码结果（只释放不应用；解码期间用户已落笔的竞态下用）。 */
+    fun dropOra(prepared: Long) {
+        if (prepared != 0L) nativeDropOra(prepared)
+    }
 
     /** 快捷：笔刷/橡皮二态切换。 */
     fun setToolEraser(eraser: Boolean) = setToolCode(if (eraser) TOOL_ERASER else TOOL_BRUSH)

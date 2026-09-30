@@ -146,7 +146,13 @@ fn engine(handle: jlong) -> &'static mut Engine {
 /// 创建引擎实例，返回 jlong 句柄（`Box::into_raw`）。
 extern "system" fn native_create(_env: JNIEnv, _this: JObject) -> jlong {
     init_logcat_logger();
-    let e = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
+    // 移动端撤销限额：桌面默认 256MB 对手机/平板过大——RSS 肥大会让
+    // 进程在后台更容易被 LMK 回收（切回冷启动白屏的诱因之一），减半。
+    let config = EngineConfig {
+        undo_memory_limit: 128 * 1024 * 1024,
+        ..EngineConfig::default()
+    };
+    let e = Engine::new(Box::new(SoftwareRenderer::new()), config);
     Box::into_raw(Box::new(e)) as jlong
 }
 
@@ -485,6 +491,67 @@ extern "system" fn native_load_ora(
         return 0;
     };
     engine(handle).load_ora(&bytes) as jboolean
+}
+
+/// 后台解码 .ora → 图层栈。纯函数不碰引擎句柄，可在任意线程调用
+///（Android 壳层在后台线程解码，避免阻塞 UI 线程 ~2s 的白屏）。
+/// 返回图层栈句柄（`Box::into_raw`）；0 = 解码失败。
+/// 句柄必须经 [`native_apply_ora`] 消费释放。
+extern "system" fn native_prepare_ora(
+    env: JNIEnv,
+    _this: JObject,
+    data: JByteArray,
+) -> jlong {
+    let Ok(bytes) = env.convert_byte_array(&data) else {
+        return 0;
+    };
+    let t0 = std::time::Instant::now();
+    match paint_core::ora::decode_ora(&bytes) {
+        Ok(ora) => {
+            let stack =
+                paint_core::engine::stack_from_layers(paint_core::ora::layers_from_ora(&ora));
+            log::info!(
+                "[io] 后台解码 ORA {} 字节 → {} 层（{:.1}ms，非 UI 线程）",
+                bytes.len(),
+                stack.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+            Box::into_raw(Box::new(stack)) as jlong
+        }
+        Err(e) => {
+            log::warn!("[io] 后台解码 ORA 失败（{} 字节）：{e}", bytes.len());
+            0
+        }
+    }
+}
+
+/// 应用 [`native_prepare_ora`] 的解码结果到引擎（UI 线程）。
+/// 无论成功与否都消费并释放 prepared 句柄（避免泄漏）。
+extern "system" fn native_apply_ora(
+    _env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+    prepared: jlong,
+) -> jboolean {
+    if prepared == 0 {
+        return 0;
+    }
+    // SAFETY: prepared 来自 Box::into_raw，本调用一次性消费
+    let stack = unsafe { Box::from_raw(prepared as *mut paint_core::LayerStack) };
+    if handle == 0 {
+        return 0; // 引擎已随 View 销毁：释放解码内容，放弃应用
+    }
+    engine(handle).load_layers(*stack);
+    1
+}
+
+/// 丢弃 [`native_prepare_ora`] 的解码结果（只释放不应用）。
+/// 解码期间用户已落笔、恢复被跳过的竞态下调用。
+extern "system" fn native_drop_ora(_env: JNIEnv, _this: JObject, prepared: jlong) {
+    if prepared != 0 {
+        // SAFETY: prepared 来自 Box::into_raw，本调用一次性消费
+        drop(unsafe { Box::from_raw(prepared as *mut paint_core::LayerStack) });
+    }
 }
 
 /// 预设名列表（内置 6 支 + 用户自定义）。
@@ -835,6 +902,9 @@ fn native_methods() -> Vec<NativeMethod> {
         ),
         entry("nativeSaveOra", "(J)[B", native_save_ora as *mut c_void),
         entry("nativeLoadOra", "(J[B)Z", native_load_ora as *mut c_void),
+        entry("nativePrepareOra", "([B)J", native_prepare_ora as *mut c_void),
+        entry("nativeApplyOra", "(JJ)Z", native_apply_ora as *mut c_void),
+        entry("nativeDropOra", "(J)V", native_drop_ora as *mut c_void),
         entry(
             "nativeSetBrushSize",
             "(JD)V",
@@ -1238,7 +1308,7 @@ mod tests {
         let methods = native_methods();
         assert_eq!(
             methods.len(),
-            52,
+            55,
             "与 PaintEngineView.kt 的 external fun 数量一致"
         );
         let mut names: Vec<String> = methods

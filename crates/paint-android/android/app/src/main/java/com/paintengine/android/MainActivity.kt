@@ -251,32 +251,52 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 首帧后的落位（UI 线程）：先恢复会话（内容优先），再喂字体。 */
+    /**
+     * 首帧后的落位（UI 线程发起）：恢复会话的解码放后台线程——大档
+     * ~2s，同步跑在 UI 线程曾把切回冷启动的白屏期又拖长一个解码
+     * 时长（期间输入冻结，还有 ANR 风险）。
+     */
     private fun applyStartupData() {
         val bytes = pendingAutosave
-        if (bytes != null && paintView.editCount() == 0L) {
-            val t = android.os.SystemClock.elapsedRealtime()
-            val ok = runCatching { paintView.loadOra(bytes) }.getOrDefault(false)
-            if (ok) {
-                savedEditCount = paintView.editCount()
-                android.util.Log.i(
-                    TAG,
-                    "[restore] 已恢复 ${bytes.size} 字节（解码 ${android.os.SystemClock.elapsedRealtime() - t}ms，首帧后）",
-                )
-                // 关键：loadOra 只置引擎脏区，必须 invalidate 触发 onDraw 重合成——
-                // 否则画布停留在首帧前的空位图（透明黑）
-                paintView.invalidate()
-                // 小地图内容同步（大档恢复后强制刷新）
-                minimapView.requestContent()
-                Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
-            } else {
-                android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
-            }
-        } else if (bytes != null) {
-            android.util.Log.i(TAG, "[restore] 首帧后用户已落笔，跳过恢复")
-        }
+        pendingAutosave = null // 所有权转移，立即弃引用（常驻 = 纯浪费内存）
         paintView.invalidate() // 无档也兜底一帧（尺寸就绪后的正式首绘）
-        ensureFont()
+        if (bytes == null || paintView.editCount() != 0L) {
+            if (bytes != null) android.util.Log.i(TAG, "[restore] 首帧后用户已落笔，跳过恢复")
+            ensureFont()
+            return
+        }
+        thread(name = "restore-decode") {
+            val t = android.os.SystemClock.elapsedRealtime()
+            val prepared = runCatching { paintView.prepareOra(bytes) }.getOrDefault(0L)
+            runOnUiThread {
+                if (prepared == 0L) {
+                    android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
+                } else if (paintView.editCount() == 0L) {
+                    val ok = runCatching { paintView.applyOra(prepared) }.getOrDefault(false)
+                    if (ok) {
+                        savedEditCount = paintView.editCount()
+                        android.util.Log.i(
+                            TAG,
+                            "[restore] 已恢复 ${bytes.size} 字节" +
+                                "（解码 ${android.os.SystemClock.elapsedRealtime() - t}ms，后台线程）",
+                        )
+                        // 关键：载入只置引擎脏区，必须 invalidate 触发 onDraw 重合成——
+                        // 否则画布停留在首帧前的空位图（透明黑）
+                        paintView.invalidate()
+                        // 小地图内容同步（大档恢复后强制刷新）
+                        minimapView.requestContent()
+                        Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
+                    } else {
+                        android.util.Log.w(TAG, "[restore] 应用失败（引擎已销毁？）")
+                    }
+                } else {
+                    // 解码期间用户已落笔：丢弃解码内容（不能覆盖新笔画）
+                    paintView.dropOra(prepared)
+                    android.util.Log.i(TAG, "[restore] 解码期间用户已落笔，跳过恢复")
+                }
+                ensureFont()
+            }
+        }
     }
 
     private var savedEditCount = 0L
@@ -313,17 +333,19 @@ class MainActivity : Activity() {
     }
 
 
-    /** 文字字体（对象光栅化）：读系统字体一次并设置（只喂引擎一次）。 */
+    /** 文字字体（对象光栅化）：读系统字体一次并设置（只喂引擎一次）。
+     *  喂完即弃壳层副本——CJK 字体 ~20MB，引擎侧以 Arc 持有，双份常驻。 */
     private fun ensureFont() {
-        if (fontBytes == null) fontBytes = loadFont()
-        val b = fontBytes
-        if (!fontOnEngine && b != null) {
+        if (fontOnEngine) return
+        val b = fontBytes ?: loadFont()
+        if (b != null) {
             val t = android.os.SystemClock.elapsedRealtime()
             paintView.setTextFont(b)
             fontOnEngine = true
+            fontBytes = null
             android.util.Log.i(
                 TAG,
-                "[startup] 字体已喂引擎（解析 ${android.os.SystemClock.elapsedRealtime() - t}ms）",
+                "[startup] 字体已喂引擎（解析 ${android.os.SystemClock.elapsedRealtime() - t}ms，壳层副本已释放）",
             )
         }
     }

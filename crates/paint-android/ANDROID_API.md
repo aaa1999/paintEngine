@@ -224,7 +224,7 @@ logcat 过滤 tag `paintEngine`;日志级别经 `nativeSetLogLevel`(预留接口
 - Kotlin `external fun` 声明不变,调用方式与以前完全一致;
 - 注册表在 `native_methods()`(`crates/paint-android/src/lib.rs`),名字与
   JNI 描述符须与 Kotlin 逐字对应;单测 `method_table_well_formed` 做结构
-  完整性检查(数量 46、名字唯一、指针非空、描述符形状);
+  完整性检查(数量 55、名字唯一、指针非空、描述符形状);
 - 签名不匹配时 `RegisterNatives` 失败 → `System.loadLibrary` 抛
   `UnsatisfiedLinkError`,同时 logcat 有 `RegisterNatives 失败` 明细。
 
@@ -251,9 +251,12 @@ nativeRenderCount (J)J                    nativeTransforming (J)Z
 nativeSetFpsMonitor (JZ)V                 nativeTransformTranslateScreen (JDD)V
 nativeSaveOra (J)[B                       nativeTransformRotate (JD)V
 nativeLoadOra (J[B)Z                      nativeTransformScale (JD)V
-nativeSetBrushSize (JD)V                  nativeCommitTransform (J)Z
-nativeSetBrushColor (JIII)V               nativeCancelTransform (J)Z
-nativePresetNames (J)[Ljava/lang/String;  nativeApplyPreset (JLjava/lang/String;)Z
+nativePrepareOra ([B)J                    nativeCommitTransform (J)Z
+nativeApplyOra (JJ)Z                      nativeCancelTransform (J)Z
+nativeDropOra (J)V                        nativeApplyPreset (JLjava/lang/String;)Z
+nativeSetBrushSize (JD)V                  nativeSetSoloIndex (JI)V
+nativeSetBrushColor (JIII)V               nativeMemoryReport (J)[J
+nativePresetNames (J)[Ljava/lang/String;  nativeViewportCenterOn (JDD)V
 ```
 
 > ABI 注意:JNI 参数类型必须两侧严格一致(Kotlin `Float` ↔ Rust `jfloat`)。

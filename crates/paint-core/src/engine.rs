@@ -2113,28 +2113,35 @@ impl Engine {
             log::warn!("[io] 载入 ORA 失败（{} 字节，解码错误）", bytes.len());
             return false;
         };
-        let layers = crate::ora::layers_from_ora(&ora);
-        let mut stack = crate::layer::LayerStack::new();
-        let mut ids = Vec::new();
-        for layer in layers {
-            let id = stack.alloc_id();
-            stack.insert_entry(stack.len(), id, layer);
-            ids.push(id);
-        }
-        if let Some(top) = ids.last() {
-            stack.set_active(*top);
-        }
-        self.doc = Document::with_layers(stack);
+        let stack = stack_from_layers(crate::ora::layers_from_ora(&ora));
+        let layers = stack.len();
+        self.load_layers(stack);
         match timing_ms(t0) {
             Some(ms) => log::info!(
                 "[io] 载入 ORA {} 字节 → {} 层（{ms:.1}ms）",
                 bytes.len(),
-                ids.len()
+                layers
             ),
-            None => log::info!("[io] 载入 ORA {} 字节 → {} 层", bytes.len(), ids.len()),
+            None => log::info!("[io] 载入 ORA {} 字节 → {} 层", bytes.len(), layers),
         }
-        self.dirty = Dirty::All;
         true
+    }
+
+    /// 以图层栈替换当前文档内容（`load_ora` 的应用阶段，壳层后台解码后调用）。
+    /// 历史重置，但撤销限额/背景/网格等 shell 级配置保留——
+    /// `Document::with_layers` 的默认 `usize::MAX` 限额会让后续撤销
+    /// 历史无上限增长（内存随绘画时长膨胀的根因）。
+    pub fn load_layers(&mut self, stack: crate::layer::LayerStack) {
+        let (limit, bg, grid) = (
+            self.doc.history().memory_limit(),
+            self.doc.background(),
+            self.doc.show_grid(),
+        );
+        self.doc = Document::with_layers(stack);
+        self.doc.set_undo_memory_limit(limit);
+        self.doc.set_background(bg);
+        self.doc.set_show_grid(grid);
+        self.dirty = Dirty::All;
     }
 
     /// 解码 PNG 并作为新图层插入（放在顶层，画布原点对齐）。
@@ -3429,6 +3436,22 @@ fn centroid_and_dist(touches: &HashMap<u64, (f64, f64)>) -> Option<((f64, f64), 
     ))
 }
 
+/// 由图层列表组装图层栈（保持 ORA 文件内自底向上的顺序，顶层为活动层）。
+/// 纯函数，不碰引擎——Android 壳层在后台线程解码时构造，回 UI 线程应用。
+pub fn stack_from_layers(layers: Vec<crate::layer::Layer>) -> crate::layer::LayerStack {
+    let mut stack = crate::layer::LayerStack::new();
+    let mut ids = Vec::new();
+    for layer in layers {
+        let id = stack.alloc_id();
+        stack.insert_entry(stack.len(), id, layer);
+        ids.push(id);
+    }
+    if let Some(top) = ids.last() {
+        stack.set_active(*top);
+    }
+    stack
+}
+
 /// 内置预设：参数语义对齐主流绘画软件的手感基准。
 fn builtin_presets() -> Vec<(String, RoundBrush)> {
     let mk = |name: &str, f: fn(&mut RoundBrush)| -> (String, RoundBrush) {
@@ -3996,6 +4019,32 @@ mod tests {
         e2.handle_event(pointer(PointerPhase::Down, 50.0, 59.0));
         let edit = e2.take_text_edit();
         assert_eq!(edit.map(|(t, _, _)| t), Some("复机".into()));
+    }
+
+    #[test]
+    fn load_ora_keeps_undo_memory_limit() {
+        // 回归：load_ora 曾走 Document::with_layers（限额 usize::MAX），
+        // 恢复档后撤销历史无上限增长（内存随绘画时长膨胀）
+        let mut e = Engine::new(
+            Box::new(MockRenderer),
+            EngineConfig {
+                undo_memory_limit: 4 * 1024 * 1024,
+                ..Default::default()
+            },
+        );
+        resize(&mut e);
+        assert!(e.add_text_object((50.0, 60.0), "限", 40.0, Some(text_raster())));
+        let bytes = e.save_ora().expect("存档");
+        assert!(e.load_ora(&bytes));
+        assert_eq!(
+            e.document().history().memory_limit(),
+            4 * 1024 * 1024,
+            "载入后限额须还原（不能是 usize::MAX）"
+        );
+        // load_layers（后台解码应用路径）同样保留
+        let stack = stack_from_layers(vec![crate::layer::Layer::new("L")]);
+        e.load_layers(stack);
+        assert_eq!(e.document().history().memory_limit(), 4 * 1024 * 1024);
     }
 
     #[test]

@@ -45,8 +45,15 @@ impl Document {
         }
     }
 
+    /// 调整撤销历史内存限额（替换内容后恢复原配置用；
+    /// [`Self::with_layers`] 的默认 `usize::MAX` 只适用于临时文档）。
+    pub fn set_undo_memory_limit(&mut self, limit: usize) {
+        self.history.set_memory_limit(limit);
+    }
+
     /// 以既有图层栈构造（导出用临时文档等场合）。默认不带网格，
-    /// 保证导出画面干净。
+    /// 保证导出画面干净。注意撤销限额为 `usize::MAX`——正式文档替换
+    /// 内容须随后经 [`Self::set_undo_memory_limit`] 还原配置。
     pub fn with_layers(layers: LayerStack) -> Self {
         Self {
             layers,
