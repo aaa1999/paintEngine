@@ -9,18 +9,18 @@
 //! ## 方法绑定：`JNI_OnLoad` + `RegisterNatives`
 //!
 //! 本 crate **不导出任何 `Java_<类全名>_<方法>` 名字混淆符号**。全部
-//! native 方法在库加载时（[JNI_OnLoad]）经 `RegisterNatives` 一次性
-//! 注册到 [JNI_CLASS] 指定的类上：
+//! native 方法在库加载时（`JNI_OnLoad`）经 `RegisterNatives` 一次性
+//! 注册到 `JNI_CLASS` 常量指定的类上：
 //!
-//! - 类名只出现在 [JNI_CLASS] 一个常量里——fork 改包名/改类名时改
+//! - 类名只出现在 `JNI_CLASS` 一个常量里——fork 改包名/改类名时改
 //!   这一处并重编即可，无需再同步 46 个符号名
-//! - 方法描述符集中列在 [native_methods] 的注册表中，与 Kotlin 侧
+//! - 方法描述符集中列在 `native_methods()` 的注册表中，与 Kotlin 侧
 //!   `external fun` 声明逐字对应（签名清单见 `ANDROID_API.md`）
 //!
 //! 引擎句柄以 jlong（裸指针）往返，单 UI 线程使用。
 
 use jni::objects::{JByteArray, JObject};
-use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jint, jlong, jfloat};
+use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jfloat, jint, jlong};
 use jni::{JNIEnv, JavaVM, NativeMethod};
 use paint_core::input::{PointerKind, PointerPhase, PointerSample};
 use paint_core::render::{EngineConfig, Surface};
@@ -58,8 +58,7 @@ mod logcat {
 
     #[link(name = "log")]
     extern "C" {
-        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...)
-            -> i32;
+        fn __android_log_print(prio: i32, tag: *const u8, fmt: *const u8, ...) -> i32;
     }
 
     /// 当前级别（log::Level 的 u8 表示；Off=0..Error=1..Trace=5 → 映射为阈值）。
@@ -124,8 +123,7 @@ impl log::Log for LogcatLogger {
 }
 
 static LOGCAT: LogcatLogger = LogcatLogger;
-static LOGGER_INSTALLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static LOGGER_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn init_logcat_logger() {
     if !LOGGER_INSTALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -241,12 +239,7 @@ extern "system" fn native_pen_in_range(
 }
 
 /// 窗口焦点变更。
-extern "system" fn native_focus(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-    focused: jboolean,
-) {
+extern "system" fn native_focus(_env: JNIEnv, _this: JObject, handle: jlong, focused: jboolean) {
     engine(handle).handle_event(PlatformEvent::Focus(focused != 0));
 }
 
@@ -304,12 +297,7 @@ fn tool_from_code(code: jint) -> Tool {
     }
 }
 
-extern "system" fn native_set_tool(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-    code: jint,
-) {
+extern "system" fn native_set_tool(_env: JNIEnv, _this: JObject, handle: jlong, code: jint) {
     engine(handle).set_tool(tool_from_code(code));
 }
 
@@ -384,9 +372,7 @@ extern "system" fn native_add_text_object(
         return 0;
     };
     let text: String = text.into();
-    engine(handle)
-        .add_text_object((x, y), &text, size as f32, None)
-        as jboolean
+    engine(handle).add_text_object((x, y), &text, size as f32, None) as jboolean
 }
 
 /// 命中的文字对象信息（预填编辑框）：[text, size, rrggbb]；无则 null。
@@ -440,11 +426,7 @@ extern "system" fn native_delete_text_object(
 }
 
 /// 呈现帧计数（单调；监控关闭时冻结）。壳层采样差值算帧率。
-extern "system" fn native_render_count(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jlong {
+extern "system" fn native_render_count(_env: JNIEnv, _this: JObject, handle: jlong) -> jlong {
     engine(handle).render_count() as jlong
 }
 
@@ -477,20 +459,12 @@ extern "system" fn native_set_log_level(_env: JNIEnv, _this: JObject, level: jin
 }
 
 /// 编辑计数（自动保存脏检查：与上次保存时不同即有未保存修改）。
-extern "system" fn native_edit_count(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jlong {
+extern "system" fn native_edit_count(_env: JNIEnv, _this: JObject, handle: jlong) -> jlong {
     engine(handle).edit_count() as jlong
 }
 
 /// 存 .ora 工程字节（自动保存用）。
-extern "system" fn native_save_ora(
-    env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jbyteArray {
+extern "system" fn native_save_ora(env: JNIEnv, _this: JObject, handle: jlong) -> jbyteArray {
     let Some(bytes) = engine(handle).save_ora() else {
         return std::ptr::null_mut();
     };
@@ -520,11 +494,7 @@ extern "system" fn native_preset_names(
     handle: jlong,
 ) -> jni::sys::jobjectArray {
     let names = engine(handle).preset_names();
-    let arr = match env.new_object_array(
-        names.len() as i32,
-        "java/lang/String",
-        JObject::null(),
-    ) {
+    let arr = match env.new_object_array(names.len() as i32, "java/lang/String", JObject::null()) {
         Ok(a) => a,
         Err(_) => return std::ptr::null_mut(),
     };
@@ -582,17 +552,12 @@ extern "system" fn native_paste_rgba(
     if bytes.len() < need {
         return 0;
     }
-    engine(handle)
-        .paste_rgba_float(&bytes, w as u32, h as u32) as jboolean
+    engine(handle).paste_rgba_float(&bytes, w as u32, h as u32) as jboolean
 }
 
 // ── 浮动内容变换（附件放置交互）──
 
-extern "system" fn native_transforming(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_transforming(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).transforming() as jboolean
 }
 
@@ -617,8 +582,7 @@ extern "system" fn native_transform_rotate(
     handle: jlong,
     delta_deg: jdouble,
 ) {
-    engine(handle)
-        .transform_rotate(delta_deg.to_radians());
+    engine(handle).transform_rotate(delta_deg.to_radians());
 }
 
 extern "system" fn native_transform_scale(
@@ -670,59 +634,31 @@ extern "system" fn native_set_brush_color(
     };
 }
 
-extern "system" fn native_undo(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_undo(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).undo() as jboolean
 }
 
-extern "system" fn native_redo(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_redo(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).redo() as jboolean
 }
 
-extern "system" fn native_add_layer(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_add_layer(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).add_layer().is_some() as jboolean
 }
 
-extern "system" fn native_merge_down(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_merge_down(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).merge_down() as jboolean
 }
 
-extern "system" fn native_flatten(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
+extern "system" fn native_flatten(_env: JNIEnv, _this: JObject, handle: jlong) -> jboolean {
     engine(handle).flatten() as jboolean
 }
 
-extern "system" fn native_layer_count(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jint {
+extern "system" fn native_layer_count(_env: JNIEnv, _this: JObject, handle: jlong) -> jint {
     engine(handle).layer_count() as jint
 }
 
-extern "system" fn native_active_layer_index(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jint {
+extern "system" fn native_active_layer_index(_env: JNIEnv, _this: JObject, handle: jlong) -> jint {
     engine(handle)
         .active_layer_index()
         .map_or(-1, |i| i as jint)
@@ -758,11 +694,7 @@ extern "system" fn native_layer_name_at(
     }
 }
 
-extern "system" fn native_fit_to_content(
-    _env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) {
+extern "system" fn native_fit_to_content(_env: JNIEnv, _this: JObject, handle: jlong) {
     engine(handle).fit_to_content(48.0);
 }
 
@@ -780,11 +712,7 @@ extern "system" fn native_set_show_grid(
 }
 
 /// 导出 PNG（可见内容包围盒，透明背景）。
-extern "system" fn native_export_png(
-    env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jbyteArray {
+extern "system" fn native_export_png(env: JNIEnv, _this: JObject, handle: jlong) -> jbyteArray {
     let Some(png) = engine(handle).export_png(None, 1.0, true) else {
         return std::ptr::null_mut();
     };
@@ -916,11 +844,7 @@ fn native_methods() -> Vec<NativeMethod> {
         entry("nativeUndo", "(J)Z", native_undo as *mut c_void),
         entry("nativeRedo", "(J)Z", native_redo as *mut c_void),
         entry("nativeAddLayer", "(J)Z", native_add_layer as *mut c_void),
-        entry(
-            "nativeMergeDown",
-            "(J)Z",
-            native_merge_down as *mut c_void,
-        ),
+        entry("nativeMergeDown", "(J)Z", native_merge_down as *mut c_void),
         entry("nativeFlatten", "(J)Z", native_flatten as *mut c_void),
         entry(
             "nativeLayerCount",
@@ -953,11 +877,7 @@ fn native_methods() -> Vec<NativeMethod> {
             "(JZ)V",
             native_set_show_grid as *mut c_void,
         ),
-        entry(
-            "nativeExportPng",
-            "(J)[B",
-            native_export_png as *mut c_void,
-        ),
+        entry("nativeExportPng", "(J)[B", native_export_png as *mut c_void),
         entry(
             "nativeImportPng",
             "(J[B)Z",
@@ -1027,7 +947,6 @@ pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) 
         }
     }
 }
-
 
 // ── AndroidBitmap 锁像素呈现 ──
 

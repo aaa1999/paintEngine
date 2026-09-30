@@ -126,6 +126,7 @@ class PaintEngineView @JvmOverloads constructor(
     // 变换模式下的拖拽参考点（view 坐标）
     private var transformDragLast: Pair<Float, Float>? = null
 
+    /** 底层引擎句柄（诊断用；与 View 同生命周期，勿缓存跨 View 使用）。 */
     val engineHandle: Long get() = handle
 
     init {
@@ -291,11 +292,13 @@ class PaintEngineView @JvmOverloads constructor(
 
     // ── 控制面（Activity/工具栏调用）──
 
+    /** 切换工具（TOOL_BRUSH..TOOL_FILL，0..10；同时记录 currentToolCode）。 */
     fun setToolCode(code: Int) {
         currentToolCode = code
         if (handle != 0L) nativeSetTool(handle, code)
     }
 
+    /** 文字即时落墨（旧路径）：以 [font] 字体字节把 [text] 画在画布锚点。 */
     fun drawText(font: ByteArray, text: String, canvasX: Double, canvasY: Double, size: Float): Boolean =
         handle != 0L && nativeDrawText(handle, font, text, canvasX, canvasY, size.toDouble())
 
@@ -332,43 +335,62 @@ class PaintEngineView @JvmOverloads constructor(
     /** 载入 .ora 替换当前文档。 */
     fun loadOra(data: ByteArray): Boolean = handle != 0L && nativeLoadOra(handle, data)
 
+    /** 快捷：笔刷/橡皮二态切换。 */
     fun setToolEraser(eraser: Boolean) = setToolCode(if (eraser) TOOL_ERASER else TOOL_BRUSH)
 
+    /** 笔刷直径，画布像素，1..512（越界自动夹取）。 */
     fun setBrushSize(size: Float) {
         if (handle != 0L) nativeSetBrushSize(handle, size.toDouble())
     }
 
+    /** 笔刷颜色，r/g/b 各 0..255（越界自动夹取）。 */
     fun setBrushColor(r: Int, g: Int, b: Int) {
         if (handle != 0L) nativeSetBrushColor(handle, r, g, b)
     }
 
+    /** 笔刷预设名列表（内置 + 用户自定义）。 */
     fun presetNames(): List<String> =
         if (handle == 0L) emptyList() else (nativePresetNames(handle)?.toList() ?: emptyList())
 
+    /** 按名应用笔刷预设；未知名返回 false。 */
     fun applyPreset(name: String): Boolean = handle != 0L && nativeApplyPreset(handle, name)
 
+    /** 撤销最近一笔（含图层结构操作）。 */
     fun undo(): Boolean = handle != 0L && nativeUndo(handle)
+    /** 重做。 */
     fun redo(): Boolean = handle != 0L && nativeRedo(handle)
+    /** 在当前层之上新建图层并选中。 */
     fun addLayer(): Boolean = handle != 0L && nativeAddLayer(handle)
+    /** 当前层向下合并。 */
     fun mergeDown(): Boolean = handle != 0L && nativeMergeDown(handle)
+    /** 合并全部图层为单层。 */
     fun flatten(): Boolean = handle != 0L && nativeFlatten(handle)
+    /** 图层数。 */
     fun layerCount(): Int = if (handle == 0L) 0 else nativeLayerCount(handle)
+    /** 当前选中图层下标；无文档返回 -1。 */
     fun activeLayerIndex(): Int = if (handle == 0L) -1 else nativeActiveLayerIndex(handle)
+    /** 按下标选中图层（0 起，底部为 0）。 */
     fun selectLayerIndex(index: Int): Boolean = handle != 0L && nativeSelectLayerIndex(handle, index)
+    /** 图层名；下标越界返回 null。 */
     fun layerNameAt(index: Int): String? = if (handle == 0L) null else nativeLayerNameAt(handle, index)
+    /** 视口适配可见内容（四周留边距）。 */
     fun fitToContent() {
         if (handle != 0L) nativeFitToContent(handle)
     }
 
+    /** 缩放复位到 100%。 */
     fun zoom100() {
         if (handle != 0L) nativeZoom100(handle)
     }
 
+    /** 网格显隐。 */
     fun setShowGrid(show: Boolean) {
         if (handle != 0L) nativeSetShowGrid(handle, show)
     }
 
+    /** 导出 PNG（可见内容包围盒、透明背景）字节。 */
     fun exportPng(): ByteArray? = if (handle == 0L) null else nativeExportPng(handle)
+    /** PNG 字节导入为新图层（视野中心）。 */
     fun importPng(data: ByteArray): Boolean = handle != 0L && nativeImportPng(handle, data)
 
     /** 附件：PNG/JPEG/WebP/SVG 自动识别 → 新图层（视野中心）。 */
@@ -378,15 +400,20 @@ class PaintEngineView @JvmOverloads constructor(
     fun pasteRgba(rgba: ByteArray, w: Int, h: Int): Boolean =
         handle != 0L && nativePasteRgba(handle, rgba, w, h)
 
+    /** 是否处于附件放置（浮动变换）模式。 */
     fun isTransforming(): Boolean = handle != 0L && nativeTransforming(handle)
+    /** 浮动内容旋转增量（度）。 */
     fun transformRotate(deltaDeg: Double) {
         if (handle != 0L) nativeTransformRotate(handle, deltaDeg)
     }
 
+    /** 浮动内容缩放因子（>1 放大）。 */
     fun transformScale(factor: Double) {
         if (handle != 0L) nativeTransformScale(handle, factor)
     }
 
+    /** 提交浮动变换，内容落墨到目标图层。 */
     fun commitTransform(): Boolean = handle != 0L && nativeCommitTransform(handle)
+    /** 取消浮动变换，丢弃浮动内容。 */
     fun cancelTransform(): Boolean = handle != 0L && nativeCancelTransform(handle)
 }
