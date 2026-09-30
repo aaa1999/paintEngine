@@ -2966,11 +2966,23 @@ impl Engine {
         if max_w == 0 || max_h == 0 {
             return None;
         }
-        let b = self.visible_content_bounds()?;
+        let b = match self.visible_content_bounds() {
+            Some(b) => b,
+            None => {
+                log::debug!("[minimap] 无内容包围盒");
+                return None;
+            }
+        };
         let scale = (max_w as f64 / b.w as f64)
             .min(max_h as f64 / b.h as f64)
             .max(0.005) as f32;
-        let png = self.export_png(Some(b), scale, false)?;
+        let png = match self.export_png(Some(b), scale, false) {
+            Some(p) => p,
+            None => {
+                log::warn!("[minimap] 导出失败 bounds={b:?} scale={scale:.4}");
+                return None;
+            }
+        };
         let (ow, oh) = (
             ((b.w as f64) * scale as f64).ceil().max(1.0) as u32,
             ((b.h as f64) * scale as f64).ceil().max(1.0) as u32,

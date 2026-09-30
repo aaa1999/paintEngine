@@ -247,6 +247,8 @@ class MainActivity : Activity() {
                 // 关键：loadOra 只置引擎脏区，必须 invalidate 触发 onDraw 重合成——
                 // 否则画布停留在首帧前的空位图（透明黑）
                 paintView.invalidate()
+                // 小地图内容同步（大档恢复后强制刷新）
+                minimapView.requestContent()
                 Toast.makeText(this, "已恢复上次会话", Toast.LENGTH_SHORT).show()
             } else {
                 android.util.Log.w(TAG, "[restore] 档案损坏，忽略")
@@ -801,10 +803,14 @@ class MainActivity : Activity() {
             color = 0xEE2A2A2E.toInt()
         }
 
+        private val panelW = (170 * ctx.resources.displayMetrics.density).toInt()
+
         init {
             val dp = ctx.resources.displayMetrics.density
             val lp = android.widget.FrameLayout.LayoutParams(
-                (170 * dp).toInt(), (170 * dp).toInt())
+                panelW, // 高度由 onMeasure 按内容宽高比自适应
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
+            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.END // 右上角固定
             lp.topMargin = (36 * dp).toInt() // 状态栏下方
             lp.rightMargin = (8 * dp).toInt()
             layoutParams = lp
@@ -820,23 +826,43 @@ class MainActivity : Activity() {
             val now = android.os.SystemClock.elapsedRealtime()
             val ec = paintView.editCount()
             if (!force && (ec == lastEdit || now - lastRefresh < 1000)) return
-            val r = paintView.minimapPng(width.takeIf { it > 0 } ?: 400,
-                height.takeIf { it > 0 } ?: 400) ?: return
-            val png = r[0] as? ByteArray ?: return
-            val m = r[1] as? FloatArray ?: return
+            // 请求尺寸与当前测量高解耦（否则输出被面板高截断→比例失真→面板高再变，
+            // 死循环）。固定：宽=面板宽，高=宽×3（引擎按内容包围盒 fit，实际不超）
+            val reqW = width.takeIf { it > 0 } ?: panelW
+            val r = paintView.minimapPng(reqW, reqW * 3) ?: run {
+                android.util.Log.w("paintEngine", "[minimap] 引擎返回 null（无内容/未就绪）")
+                return
+            }
+            val png = r[0] as? ByteArray ?: run {
+                android.util.Log.w("paintEngine", "[minimap] png 类型 ${r[0]?.javaClass}")
+                return
+            }
+            val m = r[1] as? FloatArray ?: run {
+                android.util.Log.w("paintEngine", "[minimap] meta 类型 ${r[1]?.javaClass}")
+                return
+            }
             runCatching {
                 bmp?.recycle()
                 bmp = android.graphics.BitmapFactory.decodeByteArray(png, 0, png.size)
                 meta = m
                 lastEdit = ec
                 lastRefresh = now
+                requestLayout() // 面板高度随内容比例调整
                 invalidate()
             }
         }
 
         override fun onMeasure(widthSpec: Int, heightSpec: Int) {
-            // 固定 170dp 正方形：无视 WRAP_CONTENT（默认 View 的 AT_MOST 会取满父尺寸）
-            setMeasuredDimension(layoutParams.width, layoutParams.height)
+            // 宽固定 170dp；高按内容缩略图宽高比自适应（无内容时=宽），夹 40..300dp
+            val dp = context.resources.displayMetrics.density
+            val m = meta
+            val h = if (m != null && m[0] > 0) {
+                ((panelW - paddingStart - paddingEnd) * (m[1] / m[0])).toInt() +
+                    paddingTop + paddingBottom
+            } else {
+                panelW
+            }.coerceIn((40 * dp).toInt(), (300 * dp).toInt())
+            setMeasuredDimension(panelW, h)
         }
 
         override fun onDraw(canvas: android.graphics.Canvas) {
@@ -844,10 +870,10 @@ class MainActivity : Activity() {
             canvas.drawRoundRect(0f, 0f, w, h, 10f, 10f, bgPaint)
             val b = bmp ?: run { refreshIfDue(false); return }
             val m = meta ?: return
-            // 缩略图按比例居中放入
-            val scale = minOf((w - 12f) / m[0], (h - 12f) / m[1], 8f)
+            // 缩略图贴合面板：宽撑满 padding 内区（高由 onMeasure 按同比例对齐）
+            val scale = minOf((w - paddingLeft - paddingRight) / m[0], 8f)
             val dw = m[0] * scale; val dh = m[1] * scale
-            val dx = (w - dw) / 2f; val dy = (h - dh) / 2f
+            val dx = (w - dw) / 2f; val dy = paddingTop.toFloat()
             mmPaint.alpha = 255
             canvas.drawBitmap(b, null, android.graphics.RectF(dx, dy, dx + dw, dy + dh), mmPaint)
             // 主视口指示框（画布 AABB → 缩略图坐标）
