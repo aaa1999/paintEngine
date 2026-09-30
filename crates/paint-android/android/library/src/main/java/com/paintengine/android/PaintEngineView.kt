@@ -82,6 +82,7 @@ class PaintEngineView @JvmOverloads constructor(
     private external fun nativeRenderCount(handle: Long): Long
     private external fun nativeSetFpsMonitor(handle: Long, on: Boolean)
     private external fun nativeSetSoloIndex(handle: Long, index: Int)
+    private external fun nativeMemoryReport(handle: Long): LongArray?
     private external fun nativeViewportCenterOn(handle: Long, x: Double, y: Double)
     private external fun nativeViewportRect(handle: Long): FloatArray?
     private external fun nativeMinimapPng(handle: Long, maxW: Int, maxH: Int): Array<Any>?
@@ -330,6 +331,10 @@ class PaintEngineView @JvmOverloads constructor(
     fun renderCount(): Long = if (handle == 0L) 0 else nativeRenderCount(handle)
 
     /** 帧率监控开关。 */
+    /** 内存报告（字节）：[瓦片, 撤销历史, 合计, 进程 RSS]。 */
+    fun memoryReport(): LongArray? =
+        if (handle == 0L) null else nativeMemoryReport(handle)
+
     /** 单独显示某层（index = 栈序；-1 = 全部显示）。 */
     fun setSoloIndex(index: Int) {
         if (handle != 0L) nativeSetSoloIndex(handle, index)

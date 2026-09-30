@@ -755,6 +755,11 @@ fn native_methods() -> Vec<NativeMethod> {
     vec![
         entry("nativeCreate", "()J", native_create as *mut c_void),
         entry("nativeSetSoloIndex", "(JI)V", native_set_solo_index as *mut c_void),
+        entry(
+            "nativeMemoryReport",
+            "(J)[J",
+            native_memory_report as *mut c_void,
+        ),
         entry("nativeViewportCenterOn", "(JDD)V", native_viewport_center_on as *mut c_void),
         entry("nativeViewportRect", "(J)[F", native_viewport_rect as *mut c_void),
         entry(
@@ -939,6 +944,58 @@ fn native_methods() -> Vec<NativeMethod> {
 ///
 /// 返回 `JNI_VERSION_1_6` 表示就绪；注册失败返回 `JNI_ERR`，宿主将
 /// 收到 `UnsatisfiedLinkError`（类名/签名与 Kotlin 声明不匹配时）。
+
+/// 进程驻留内存（字节；Android/Linux 经 /proc/self/statm）。
+fn process_rss_bytes() -> Option<u64> {
+    let txt = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let second = txt.split_whitespace().nth(1)?;
+    let pages: u64 = second.parse().ok()?;
+    Some(pages * 4096)
+}
+
+/// 内存报告（字节）：[瓦片, 撤销历史, 合计, 进程 RSS]。
+#[no_mangle]
+pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeMemoryReport(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jlongArray {
+    let (tiles, undo, total) = engine(handle).memory_report();
+    let rss = process_rss_bytes().unwrap_or(0);
+    let vals = [tiles as i64, undo as i64, total as i64, rss as i64];
+    match env.new_long_array(4) {
+        Ok(mut a) => {
+            if env.set_long_array_region(&mut a, 0, &vals).is_ok() {
+                a.as_raw()
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// 内存报告（字节）：[瓦片, 撤销历史, 合计, 进程 RSS]。
+extern "system" fn native_memory_report(
+    env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jni::sys::jlongArray {
+    let (tiles, undo, total) = engine(handle).memory_report();
+    let rss = process_rss_bytes().unwrap_or(0);
+    let vals = [tiles as i64, undo as i64, total as i64, rss as i64];
+    match env.new_long_array(4) {
+        Ok(mut a) => {
+            if env.set_long_array_region(&mut a, 0, &vals).is_ok() {
+                a.as_raw()
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// 单独显示某层（index = 栈序；-1 = 恢复全部显示）。
 extern "system" fn native_set_solo_index(
     _env: JNIEnv,
@@ -1181,7 +1238,7 @@ mod tests {
         let methods = native_methods();
         assert_eq!(
             methods.len(),
-            51,
+            52,
             "与 PaintEngineView.kt 的 external fun 数量一致"
         );
         let mut names: Vec<String> = methods

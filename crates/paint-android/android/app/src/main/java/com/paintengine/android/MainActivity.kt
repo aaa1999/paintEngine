@@ -56,6 +56,9 @@ class MainActivity : Activity() {
     // 帧率悬浮标签（设置项控制显隐）
     private lateinit var fpsLabel: Button
 
+    // 内存悬浮行（设置项控制；显示在 FPS 标签下方）
+    private lateinit var memLabel: Button
+
     // 定位小地图（设置项控制显隐）
     private lateinit var minimapView: MinimapView
 
@@ -121,7 +124,30 @@ class MainActivity : Activity() {
             .getBoolean("fps_monitor", true)) // 设置项默认开
         // 悬浮标签点击 = 快捷开关（正式入口在"设置"）
         fpsLabel.setOnClickListener { applyFpsMonitor(fpsLabel.visibility != View.VISIBLE) }
+        // 内存监控行（设置项控制；开启时显示在 FPS 下）
+        memLabel = Button(this).apply {
+            text = ""
+            setTextColor(android.graphics.Color.parseColor("#7FB8E3"))
+            setBackgroundColor(0x99000000.toInt())
+            setPadding(dp(8), dp(1), dp(8), dp(1))
+            textSize = 10f
+            typeface = android.graphics.Typeface.MONOSPACE
+            minWidth = 0
+            minHeight = 0
+            stateListAnimator = null
+            val lp = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT)
+            lp.gravity = android.view.Gravity.TOP or android.view.Gravity.START
+            lp.leftMargin = dp(8)
+            lp.topMargin = dp(64) // FPS 标签下方
+            layoutParams = lp
+            visibility = View.GONE
+        }
+        applyMemMonitor(getSharedPreferences("cfg", MODE_PRIVATE)
+            .getBoolean("mem_monitor", false))
         stage.addView(fpsLabel)
+        stage.addView(memLabel)
         // 注意：不传 LayoutParams——WRAP_CONTENT 会让无内容测量的 View 铺满父容器
         // （ getDefaultSize AT_MOST 取 spec 尺寸），整个画布被半透明深底盖黑。
         // MinimapView init 里自设了 170dp 精确尺寸 + 右上角边距。
@@ -144,6 +170,12 @@ class MainActivity : Activity() {
                         lastTime = now
                     }
                     fpsLabel.text = "FPS ${"%.1f".format(smoothed)}"
+                    if (memLabel.visibility == View.VISIBLE) {
+                        val mr = paintView.memoryReport()
+                        if (mr != null && mr.size >= 4) {
+                            memLabel.text = "MEM ${fmtBytes(mr[3])}（瓦片${fmtBytes(mr[0])} 撤销${fmtBytes(mr[1])}）"
+                        }
+                    }
                     // 帧率进日志：每 5s 一条
                     if (++fpsLogTick >= 10) {
                         fpsLogTick = 0
@@ -741,6 +773,22 @@ class MainActivity : Activity() {
             .show()
     }
 
+    /** 内存监控设置项应用：悬浮行显隐 + 持久化（读数在 FPS 更新循环里刷新）。 */
+    private fun applyMemMonitor(on: Boolean) {
+        getSharedPreferences("cfg", MODE_PRIVATE)
+            .edit().putBoolean("mem_monitor", on).apply()
+        memLabel.visibility = if (on) View.VISIBLE else View.GONE
+        if (on) memLabel.text = "MEM --"
+    }
+
+    /** 字节数人性化：B/KB/MB/GB。 */
+    private fun fmtBytes(b: Long): String = when {
+        b >= 1 shl 30 -> "%.2fGB".format(b / 1073741824.0)
+        b >= 1 shl 20 -> "%.1fMB".format(b / 1048576.0)
+        b >= 1 shl 10 -> "%.1fKB".format(b / 1024.0)
+        else -> "${b}B"
+    }
+
     /** 帧率监控设置项应用：引擎开关 + 悬浮标签显隐 + 持久化。 */
     private fun applyFpsMonitor(on: Boolean) {
         getSharedPreferences("cfg", MODE_PRIVATE)
@@ -752,11 +800,12 @@ class MainActivity : Activity() {
     /** 设置项：帧率监控 / 网格点阵（SharedPreferences 持久化）。 */
     private fun showSettingsDialog() {
         val prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        val items = arrayOf("帧率监控", "网格点阵", "定位小地图")
+        val items = arrayOf("帧率监控", "网格点阵", "定位小地图", "内存监控")
         val checked = booleanArrayOf(
             prefs.getBoolean("fps_monitor", true),
             prefs.getBoolean("show_grid", true),
-            prefs.getBoolean("minimap", false),
+            prefs.getBoolean("minimap", true),
+            prefs.getBoolean("mem_monitor", false),
         )
         android.app.AlertDialog.Builder(this)
             .setTitle("设置")
@@ -773,6 +822,7 @@ class MainActivity : Activity() {
                         minimapView.visibility = if (isChecked) View.VISIBLE else View.GONE
                         if (isChecked) minimapView.requestContent()
                     }
+                    3 -> applyMemMonitor(isChecked)
                 }
             }
             .setPositiveButton("完成", null)
