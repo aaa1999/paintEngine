@@ -6,17 +6,30 @@
 //! - 输入：Kotlin `PaintEngineView` 把 MotionEvent（含历史点展开、
 //!   压感、笔悬停）翻译成 PlatformEvent 转发进来
 //!
-//! JNI 命名对应 `com.paintengine.android.PaintEngineView` 的
-//! `external fun` 声明。引擎句柄以 jlong（裸指针）往返，
-//! 单 UI 线程使用。
+//! ## 方法绑定：`JNI_OnLoad` + `RegisterNatives`
+//!
+//! 本 crate **不导出任何 `Java_<类全名>_<方法>` 名字混淆符号**。全部
+//! native 方法在库加载时（[JNI_OnLoad]）经 `RegisterNatives` 一次性
+//! 注册到 [JNI_CLASS] 指定的类上：
+//!
+//! - 类名只出现在 [JNI_CLASS] 一个常量里——fork 改包名/改类名时改
+//!   这一处并重编即可，无需再同步 46 个符号名
+//! - 方法描述符集中列在 [native_methods] 的注册表中，与 Kotlin 侧
+//!   `external fun` 声明逐字对应（签名清单见 `ANDROID_API.md`）
+//!
+//! 引擎句柄以 jlong（裸指针）往返，单 UI 线程使用。
 
-use jni::objects::{JByteArray, JClass, JObject};
-use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jint, jlong};
-use jni::JNIEnv;
+use jni::objects::{JByteArray, JObject};
+use jni::sys::{jboolean, jbyte, jbyteArray, jdouble, jint, jlong, jfloat};
+use jni::{JNIEnv, JavaVM, NativeMethod};
 use paint_core::input::{PointerKind, PointerPhase, PointerSample};
 use paint_core::render::{EngineConfig, Surface};
 use paint_core::{Engine, PlatformEvent, Rect, Tool};
 use paint_render::SoftwareRenderer;
+
+/// native 方法注册的目标类（Kotlin 侧 `PaintEngineView` 的全名，
+/// `/` 分隔）。改名只需改这一处。
+const JNI_CLASS: &str = "com/paintengine/android/PaintEngineView";
 
 // 与 Kotlin 侧约定的常量（见 PaintEngineView.kt）
 const PHASE_DOWN: jint = 0;
@@ -80,7 +93,7 @@ mod logcat {
     }
 }
 
-/// logcat 日志器（nativeCreate 时安装一次）。
+/// logcat 日志器（JNI_OnLoad 时安装一次）。
 struct LogcatLogger;
 
 impl log::Log for LogcatLogger {
@@ -128,41 +141,38 @@ fn engine(handle: jlong) -> &'static mut Engine {
     unsafe { &mut *(handle as *mut Engine) }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeCreate(
-    _env: JNIEnv,
-    _class: JClass,
-) -> jlong {
+// ── native 实现（经 RegisterNatives 绑定，不导出符号）──
+// 约定：函数名 = Kotlin external fun 的 snake_case；
+// env 之后第一个参数是实例方法的 this。除注明外全部单 UI 线程调用。
+
+/// 创建引擎实例，返回 jlong 句柄（`Box::into_raw`）。
+extern "system" fn native_create(_env: JNIEnv, _this: JObject) -> jlong {
     init_logcat_logger();
     let e = Engine::new(Box::new(SoftwareRenderer::new()), EngineConfig::default());
     Box::into_raw(Box::new(e)) as jlong
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeDestroy(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) {
+/// 销毁引擎（View 脱离窗口时）。
+extern "system" fn native_destroy(_env: JNIEnv, _this: JObject, handle: jlong) {
     if handle != 0 {
         drop(unsafe { Box::from_raw(handle as *mut Engine) });
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeResize(
+/// 视口尺寸变更（物理像素 + density）。
+extern "system" fn native_resize(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     w: jint,
     h: jint,
-    scale: jdouble,
+    scale: jfloat,
 ) {
     if w > 0 && h > 0 {
         engine(handle).handle_event(PlatformEvent::Resize {
             w: w as u32,
             h: h as u32,
-            scale: scale as f32,
+            scale,
         });
     }
 }
@@ -170,10 +180,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeResize
 /// `pressure < 0` 表示无压感（手指/鼠标按满压处理）；
 /// `tilt_x/tilt_y = NaN` 表示无倾斜数据。
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePointer(
+extern "system" fn native_pointer(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     phase: jint,
     id: jint,
@@ -217,24 +226,24 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePointe
     engine(handle).handle_event(PlatformEvent::Pointer { phase, sample });
 }
 
-fn ppressure(v: f64) -> f32 {
+fn ppressure(v: jdouble) -> f32 {
     (v as f32).clamp(0.0, 1.0)
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePenInRange(
+/// 数位笔悬停状态（引擎据此做手掌拒绝）。
+extern "system" fn native_pen_in_range(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     in_range: jboolean,
 ) {
     engine(handle).handle_event(PlatformEvent::PenInRange(in_range != 0));
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFocus(
+/// 窗口焦点变更。
+extern "system" fn native_focus(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     focused: jboolean,
 ) {
@@ -243,14 +252,12 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFocus(
 
 /// 合成到 `bitmap`（ARGB_8888，与引擎预乘 RGBA 布局一致）。
 /// 返回 false 表示位图格式不受支持。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeRender(
-    env: JNIEnv,
-    _class: JClass,
+extern "system" fn native_render(
+    mut env: JNIEnv,
+    _this: JObject,
     handle: jlong,
     bitmap: JObject,
 ) -> jboolean {
-    let mut env = env;
     let Some(mut locked) = lock_bitmap(&mut env, &bitmap) else {
         return 0;
     };
@@ -297,10 +304,9 @@ fn tool_from_code(code: jint) -> Tool {
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetTool(
+extern "system" fn native_set_tool(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     code: jint,
 ) {
@@ -308,10 +314,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetToo
 }
 
 /// 文字工具锚点（画布坐标）。无锚点返回 null；一次性取走。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTakeTextAnchor(
+extern "system" fn native_take_text_anchor(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jni::sys::jfloatArray {
     let Some((x, y)) = engine(handle).take_text_anchor() else {
@@ -331,10 +336,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTakeTe
 }
 
 /// 文字落墨（字体字节由 Kotlin 侧从 /system/fonts 加载）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeDrawText(
+extern "system" fn native_draw_text(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     font: JByteArray,
     text: jni::objects::JString,
@@ -355,10 +359,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeDrawTe
 }
 
 /// 设置文字字体（对象光栅化用；启动时加载系统字体一次）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetTextFont(
+extern "system" fn native_set_text_font(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     font: JByteArray,
 ) {
@@ -368,10 +371,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetTex
 }
 
 /// 新增文字对象（非破坏，可重编辑）。`raster = null` → 引擎 swash 渲染。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeAddTextObject(
+extern "system" fn native_add_text_object(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     text: jni::objects::JString,
     x: jdouble,
@@ -388,10 +390,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeAddTex
 }
 
 /// 命中的文字对象信息（预填编辑框）：[text, size, rrggbb]；无则 null。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTakeTextEdit(
+extern "system" fn native_take_text_edit(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jni::sys::jobjectArray {
     let Some((text, size, color)) = engine(handle).take_text_edit() else {
@@ -415,10 +416,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTakeTe
 }
 
 /// 更新命中的文字对象（内容/字号）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeUpdateTextObject(
+extern "system" fn native_update_text_object(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     text: jni::objects::JString,
     size: jdouble,
@@ -431,107 +431,37 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeUpdate
 }
 
 /// 删除命中的文字对象。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeDeleteTextObject(
+extern "system" fn native_delete_text_object(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).delete_text_object() as jboolean
 }
 
 /// 呈现帧计数（单调；监控关闭时冻结）。壳层采样差值算帧率。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeRenderCount(
+extern "system" fn native_render_count(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jlong {
     engine(handle).render_count() as jlong
 }
 
 /// 帧率监控开关。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetFpsMonitor(
+extern "system" fn native_set_fps_monitor(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     on: jboolean,
 ) {
     engine(handle).set_fps_monitor(on != 0);
 }
 
-/// 视口定位：把画布坐标移到屏幕中心（小地图拖动）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeViewportCenterOn(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-    x: jdouble,
-    y: jdouble,
-) {
-    engine(handle).viewport_center_on(x, y);
-}
-
-/// 可见画布区域 AABB：(x, y, w, h)。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeViewportRect(
-    env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) -> jni::sys::jfloatArray {
-    let (x, y, w, h) = engine(handle).viewport_rect();
-    let vals = [x as f32, y as f32, w as f32, h as f32];
-    match env.new_float_array(4) {
-        Ok(mut a) => {
-            if env.set_float_array_region(&mut a, 0, &vals).is_ok() {
-                a.as_raw()
-            } else {
-                std::ptr::null_mut()
-            }
-        }
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-/// 小地图：返回 Object[2] = {byte[] png, float[7] meta(ow,oh,bx,by,bw,bh,占位)}。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeMinimapPng(
-    mut env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-    max_w: jint,
-    max_h: jint,
-) -> jni::sys::jobjectArray {
-    let Some((png, ow, oh, bx, by, bw, bh)) =
-        engine(handle).minimap_png(max_w.max(1) as u32, max_h.max(1) as u32)
-    else {
-        return std::ptr::null_mut();
-    };
-    let arr = match env.new_object_array(2, "java/lang/Object", JObject::null()) {
-        Ok(a) => a,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let Ok(bytes) = env.byte_array_from_slice(&png) else {
-        return std::ptr::null_mut();
-    };
-    let _ = env.set_object_array_element(&arr, 0, bytes);
-    let meta = [ow as f32, oh as f32, bx as f32, by as f32, bw as f32, bh as f32, 0.0];
-    if let Ok(mut m) = env.new_float_array(7) {
-        if env.set_float_array_region(&mut m, 0, &meta).is_ok() {
-            let _ = env.set_object_array_element(&arr, 1, m);
-        }
-    }
-    arr.as_raw()
-}
-
 /// 日志级别设置（0=Off 1=Error 2=Warn 3=Info 4=Debug 5=Trace；adb 调试用）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetLogLevel(
-    _env: JNIEnv,
-    _class: JClass,
-    level: jint,
-) {
+/// 未在 Kotlin 侧声明 external fun——预留接口。
+#[allow(dead_code)]
+extern "system" fn native_set_log_level(_env: JNIEnv, _this: JObject, level: jint) {
     let lv = match level {
         0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
@@ -547,20 +477,18 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetLog
 }
 
 /// 编辑计数（自动保存脏检查：与上次保存时不同即有未保存修改）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeEditCount(
+extern "system" fn native_edit_count(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jlong {
     engine(handle).edit_count() as jlong
 }
 
 /// 存 .ora 工程字节（自动保存用）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSaveOra(
+extern "system" fn native_save_ora(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jbyteArray {
     let Some(bytes) = engine(handle).save_ora() else {
@@ -573,10 +501,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSaveOr
 }
 
 /// 载入 .ora 替换当前文档。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLoadOra(
+extern "system" fn native_load_ora(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     data: JByteArray,
 ) -> jboolean {
@@ -587,10 +514,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLoadOr
 }
 
 /// 预设名列表（内置 6 支 + 用户自定义）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePresetNames(
+extern "system" fn native_preset_names(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jni::sys::jobjectArray {
     let names = engine(handle).preset_names();
@@ -611,10 +537,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePreset
 }
 
 /// 应用笔刷预设（按名）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeApplyPreset(
+extern "system" fn native_apply_preset(
     mut env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     name: jni::objects::JString,
 ) -> jboolean {
@@ -626,10 +551,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeApplyP
 }
 
 /// 附件导入：PNG/JPEG/WebP/SVG 自动识别 → 新图层（视野中心）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeImportImage(
+extern "system" fn native_import_image(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     data: JByteArray,
 ) -> jboolean {
@@ -640,10 +564,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeImport
 }
 
 /// 直行 RGBA → 浮动层（PDF 等壳层渲染的位图走此通道，可拖拽放置）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePasteRgba(
+extern "system" fn native_paste_rgba(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     rgba: JByteArray,
     w: jint,
@@ -665,20 +588,18 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativePasteR
 
 // ── 浮动内容变换（附件放置交互）──
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransforming(
+extern "system" fn native_transforming(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).transforming() as jboolean
 }
 
 /// 屏幕位移 → 画布位移（经视口逆变换，旋转/缩放下方向正确）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransformTranslateScreen(
+extern "system" fn native_transform_translate_screen(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     dx: jdouble,
     dy: jdouble,
@@ -690,10 +611,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransf
     e.transform_translate(cx1 - cx0, cy1 - cy0);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransformRotate(
+extern "system" fn native_transform_rotate(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     delta_deg: jdouble,
 ) {
@@ -701,48 +621,43 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransf
         .transform_rotate(delta_deg.to_radians());
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeTransformScale(
+extern "system" fn native_transform_scale(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     factor: jdouble,
 ) {
     engine(handle).transform_scale(factor);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeCommitTransform(
+extern "system" fn native_commit_transform(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).commit_transform() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeCancelTransform(
+extern "system" fn native_cancel_transform(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).cancel_transform() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetBrushSize(
+extern "system" fn native_set_brush_size(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     size: jdouble,
 ) {
     engine(handle).brush_mut().size = (size as f32).clamp(1.0, 512.0);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetBrushColor(
+extern "system" fn native_set_brush_color(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     r: jint,
     g: jint,
@@ -755,64 +670,57 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetBru
     };
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeUndo(
+extern "system" fn native_undo(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).undo() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeRedo(
+extern "system" fn native_redo(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).redo() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeAddLayer(
+extern "system" fn native_add_layer(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).add_layer().is_some() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeMergeDown(
+extern "system" fn native_merge_down(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).merge_down() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFlatten(
+extern "system" fn native_flatten(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jboolean {
     engine(handle).flatten() as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLayerCount(
+extern "system" fn native_layer_count(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jint {
     engine(handle).layer_count() as jint
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeActiveLayerIndex(
+extern "system" fn native_active_layer_index(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jint {
     engine(handle)
@@ -820,10 +728,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeActive
         .map_or(-1, |i| i as jint)
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSelectLayerIndex(
+extern "system" fn native_select_layer_index(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     index: jint,
 ) -> jboolean {
@@ -833,10 +740,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSelect
     engine(handle).select_layer_index(index as usize) as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLayerNameAt(
+extern "system" fn native_layer_name_at(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     index: jint,
 ) -> jni::sys::jstring {
@@ -852,28 +758,21 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeLayerN
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeFitToContent(
+extern "system" fn native_fit_to_content(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) {
     engine(handle).fit_to_content(48.0);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeZoom100(
-    _env: JNIEnv,
-    _class: JClass,
-    handle: jlong,
-) {
+extern "system" fn native_zoom_100(_env: JNIEnv, _this: JObject, handle: jlong) {
     engine(handle).zoom_100();
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetShowGrid(
+extern "system" fn native_set_show_grid(
     _env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     show: jboolean,
 ) {
@@ -881,10 +780,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeSetSho
 }
 
 /// 导出 PNG（可见内容包围盒，透明背景）。
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeExportPng(
+extern "system" fn native_export_png(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
 ) -> jbyteArray {
     let Some(png) = engine(handle).export_png(None, 1.0, true) else {
@@ -896,10 +794,9 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeExport
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeImportPng(
+extern "system" fn native_import_png(
     env: JNIEnv,
-    _class: JClass,
+    _this: JObject,
     handle: jlong,
     data: JByteArray,
 ) -> jboolean {
@@ -911,6 +808,226 @@ pub extern "system" fn Java_com_paintengine_android_PaintEngineView_nativeImport
 
 #[allow(dead_code)]
 fn unused(_: jbyte) {}
+
+// ── 方法注册表与库加载入口 ──
+
+/// 构建注册表：名字 →（JNI 描述符, 实现指针）。
+///
+/// 名字/描述符必须与 `PaintEngineView.kt` 的 `external fun` 声明逐字
+/// 一致；[self::tests] 做结构完整性检查（重复名/空指针/描述符形状）。
+fn native_methods() -> Vec<NativeMethod> {
+    use std::ffi::c_void;
+    fn entry(name: &str, sig: &str, f: *mut c_void) -> NativeMethod {
+        NativeMethod {
+            name: name.into(),
+            sig: sig.into(),
+            fn_ptr: f,
+        }
+    }
+    vec![
+        entry("nativeCreate", "()J", native_create as *mut c_void),
+        entry("nativeDestroy", "(J)V", native_destroy as *mut c_void),
+        entry("nativeResize", "(JIIF)V", native_resize as *mut c_void),
+        entry(
+            "nativePointer",
+            "(JIDDDDDIJ)V",
+            native_pointer as *mut c_void,
+        ),
+        entry(
+            "nativePenInRange",
+            "(JZ)V",
+            native_pen_in_range as *mut c_void,
+        ),
+        entry("nativeFocus", "(JZ)V", native_focus as *mut c_void),
+        entry(
+            "nativeRender",
+            "(JLandroid/graphics/Bitmap;)Z",
+            native_render as *mut c_void,
+        ),
+        entry("nativeSetTool", "(JI)V", native_set_tool as *mut c_void),
+        entry(
+            "nativeTakeTextAnchor",
+            "(J)[F",
+            native_take_text_anchor as *mut c_void,
+        ),
+        entry(
+            "nativeDrawText",
+            "(J[BLjava/lang/String;DDD)Z",
+            native_draw_text as *mut c_void,
+        ),
+        entry(
+            "nativeSetTextFont",
+            "(J[B)V",
+            native_set_text_font as *mut c_void,
+        ),
+        entry(
+            "nativeAddTextObject",
+            "(JLjava/lang/String;DDD)Z",
+            native_add_text_object as *mut c_void,
+        ),
+        entry(
+            "nativeTakeTextEdit",
+            "(J)[Ljava/lang/String;",
+            native_take_text_edit as *mut c_void,
+        ),
+        entry(
+            "nativeUpdateTextObject",
+            "(JLjava/lang/String;D)Z",
+            native_update_text_object as *mut c_void,
+        ),
+        entry(
+            "nativeDeleteTextObject",
+            "(J)Z",
+            native_delete_text_object as *mut c_void,
+        ),
+        entry("nativeEditCount", "(J)J", native_edit_count as *mut c_void),
+        entry(
+            "nativeRenderCount",
+            "(J)J",
+            native_render_count as *mut c_void,
+        ),
+        entry(
+            "nativeSetFpsMonitor",
+            "(JZ)V",
+            native_set_fps_monitor as *mut c_void,
+        ),
+        entry("nativeSaveOra", "(J)[B", native_save_ora as *mut c_void),
+        entry("nativeLoadOra", "(J[B)Z", native_load_ora as *mut c_void),
+        entry(
+            "nativeSetBrushSize",
+            "(JD)V",
+            native_set_brush_size as *mut c_void,
+        ),
+        entry(
+            "nativeSetBrushColor",
+            "(JIII)V",
+            native_set_brush_color as *mut c_void,
+        ),
+        entry(
+            "nativePresetNames",
+            "(J)[Ljava/lang/String;",
+            native_preset_names as *mut c_void,
+        ),
+        entry(
+            "nativeApplyPreset",
+            "(JLjava/lang/String;)Z",
+            native_apply_preset as *mut c_void,
+        ),
+        entry("nativeUndo", "(J)Z", native_undo as *mut c_void),
+        entry("nativeRedo", "(J)Z", native_redo as *mut c_void),
+        entry("nativeAddLayer", "(J)Z", native_add_layer as *mut c_void),
+        entry(
+            "nativeMergeDown",
+            "(J)Z",
+            native_merge_down as *mut c_void,
+        ),
+        entry("nativeFlatten", "(J)Z", native_flatten as *mut c_void),
+        entry(
+            "nativeLayerCount",
+            "(J)I",
+            native_layer_count as *mut c_void,
+        ),
+        entry(
+            "nativeActiveLayerIndex",
+            "(J)I",
+            native_active_layer_index as *mut c_void,
+        ),
+        entry(
+            "nativeSelectLayerIndex",
+            "(JI)Z",
+            native_select_layer_index as *mut c_void,
+        ),
+        entry(
+            "nativeLayerNameAt",
+            "(JI)Ljava/lang/String;",
+            native_layer_name_at as *mut c_void,
+        ),
+        entry(
+            "nativeFitToContent",
+            "(J)V",
+            native_fit_to_content as *mut c_void,
+        ),
+        entry("nativeZoom100", "(J)V", native_zoom_100 as *mut c_void),
+        entry(
+            "nativeSetShowGrid",
+            "(JZ)V",
+            native_set_show_grid as *mut c_void,
+        ),
+        entry(
+            "nativeExportPng",
+            "(J)[B",
+            native_export_png as *mut c_void,
+        ),
+        entry(
+            "nativeImportPng",
+            "(J[B)Z",
+            native_import_png as *mut c_void,
+        ),
+        entry(
+            "nativeImportImage",
+            "(J[B)Z",
+            native_import_image as *mut c_void,
+        ),
+        entry(
+            "nativePasteRgba",
+            "(J[BII)Z",
+            native_paste_rgba as *mut c_void,
+        ),
+        entry(
+            "nativeTransforming",
+            "(J)Z",
+            native_transforming as *mut c_void,
+        ),
+        entry(
+            "nativeTransformTranslateScreen",
+            "(JDD)V",
+            native_transform_translate_screen as *mut c_void,
+        ),
+        entry(
+            "nativeTransformRotate",
+            "(JD)V",
+            native_transform_rotate as *mut c_void,
+        ),
+        entry(
+            "nativeTransformScale",
+            "(JD)V",
+            native_transform_scale as *mut c_void,
+        ),
+        entry(
+            "nativeCommitTransform",
+            "(J)Z",
+            native_commit_transform as *mut c_void,
+        ),
+        entry(
+            "nativeCancelTransform",
+            "(J)Z",
+            native_cancel_transform as *mut c_void,
+        ),
+    ]
+}
+
+/// 库加载入口（`System.loadLibrary` 触发）：注册全部 native 方法。
+///
+/// 返回 `JNI_VERSION_1_6` 表示就绪；注册失败返回 `JNI_ERR`，宿主将
+/// 收到 `UnsatisfiedLinkError`（类名/签名与 Kotlin 声明不匹配时）。
+#[no_mangle]
+pub extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut std::ffi::c_void) -> jint {
+    init_logcat_logger();
+    let Ok(mut env) = vm.get_env() else {
+        return jni::sys::JNI_ERR;
+    };
+    match env.register_native_methods(JNI_CLASS, &native_methods()) {
+        Ok(()) => {
+            log::info!("[app] RegisterNatives 完成：{} 个方法 → {JNI_CLASS}", 46);
+            jni::sys::JNI_VERSION_1_6
+        }
+        Err(e) => {
+            log::error!("[app] RegisterNatives 失败（类名或签名不匹配？）：{e}");
+            jni::sys::JNI_ERR
+        }
+    }
+}
+
 
 // ── AndroidBitmap 锁像素呈现 ──
 
@@ -1044,4 +1161,45 @@ impl Surface for DummySurface {
 #[cfg(not(target_os = "android"))]
 fn lock_bitmap(_env: &mut JNIEnv, _bitmap: &JObject) -> Option<DummySurface> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 注册表结构完整性：数量、名字唯一、指针非空、描述符形状合法
+    ///（以 `(` 开头、含返回类型、无空白）。不触 JVM，host 可跑。
+    #[test]
+    fn method_table_well_formed() {
+        let methods = native_methods();
+        assert_eq!(
+            methods.len(),
+            46,
+            "与 PaintEngineView.kt 的 external fun 数量一致"
+        );
+        let mut names: Vec<String> = methods
+            .iter()
+            .map(|m| m.name.to_str().unwrap_or_default().to_owned())
+            .collect();
+        names.sort_unstable();
+        assert!(names.windows(2).all(|w| w[0] != w[1]), "存在重复方法名");
+        for m in &methods {
+            let name = m.name.to_str().unwrap_or_default();
+            let sig = m.sig.to_str().unwrap_or_default();
+            assert!(!m.fn_ptr.is_null(), "{name} 实现指针为空");
+            assert!(sig.starts_with('('), "{name} 描述符缺 '('：{sig}");
+            assert!(sig.len() >= 3, "{name} 描述符过短：{sig}");
+            assert!(
+                !sig.chars().any(char::is_whitespace),
+                "{name} 描述符含空白：{sig}"
+            );
+        }
+    }
+
+    /// 目标类常量是合法二进制名（`/` 分隔，无 `.`）。
+    #[test]
+    fn jni_class_name_slash_separated() {
+        assert!(!JNI_CLASS.contains('.'));
+        assert!(JNI_CLASS.split('/').all(|p| !p.is_empty()));
+    }
 }
